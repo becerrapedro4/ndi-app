@@ -2672,6 +2672,11 @@ private fun AudioTab(onMenu: () -> Unit) {
     var picked by remember { mutableStateOf<android.net.Uri?>(null) }
     val systemRunning = SystemAudioService.running.value
     val systemStatus = SystemAudioService.status.value
+    val systemDetail = SystemAudioService.detail.value
+    val canRecord = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.RECORD_AUDIO
+    ) == PackageManager.PERMISSION_GRANTED
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -2809,10 +2814,6 @@ private fun AudioTab(onMenu: () -> Unit) {
                             "Iniciar"
                         }
                     ) {
-                        val canRecord = ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.RECORD_AUDIO
-                        ) == PackageManager.PERMISSION_GRANTED
                         when (mode) {
                             2 -> {
                                 if (systemRunning) {
@@ -2862,6 +2863,47 @@ private fun AudioTab(onMenu: () -> Unit) {
                     running = running || systemRunning,
                     text = if (mode == 2 && systemStatus.isNotEmpty()) systemStatus else status
                 )
+                if (mode == 2) {
+                    Text(
+                        "Estado de la captura de audio del sistema",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = NdiGlass.Text
+                    )
+                    Text(
+                        when {
+                            systemRunning && systemStatus.isNotEmpty() -> systemStatus
+                            systemRunning -> "Captura activa, sin datos todavía"
+                            systemStatus.isNotEmpty() -> systemStatus
+                            else -> "Sin captura en marcha"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NdiGlass.Text
+                    )
+                    if (systemRunning && systemDetail.isNotEmpty()) {
+                        Text(
+                            systemDetail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NdiGlass.Muted
+                        )
+                    }
+                    Text(
+                        if (canRecord) {
+                            "Permiso de micrófono (RECORD_AUDIO): concedido"
+                        } else {
+                            "Permiso de micrófono (RECORD_AUDIO): falta; pulsa Iniciar para concederlo"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NdiGlass.Muted
+                    )
+                    Text(
+                        "Motivos posibles si no llega sonido: permiso denegado, proyección detenida " +
+                            "por el sistema (bloqueo de pantalla u otra captura) o una app que excluye " +
+                            "su audio de la captura. Si llega silencio, prueba con YouTube o un " +
+                            "reproductor del sistema.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NdiGlass.Muted
+                    )
+                }
             }
         }
     }

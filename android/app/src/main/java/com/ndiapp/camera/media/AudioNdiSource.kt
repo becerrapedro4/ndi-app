@@ -9,6 +9,7 @@ import android.os.Looper
 import androidx.annotation.RequiresApi
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiSender
+import kotlin.math.log10
 
 /**
  * Fuente NDI de solo audio: el micrófono o un archivo de audio.
@@ -20,6 +21,9 @@ import com.ndiapp.camera.ndi.NdiSender
 class AudioNdiSource(private val context: Context) {
 
     var onStatus: ((String) -> Unit)? = null
+
+    /** Datos técnicos de la captura del sistema (muestras, nivel, formato). */
+    var onSystemDetail: ((String) -> Unit)? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private var sender: NdiSender? = null
@@ -37,6 +41,47 @@ class AudioNdiSource(private val context: Context) {
         while (index < size) {
             this[index] = 0xFF.toByte()
             index += 4
+        }
+    }
+
+    private var lastSystemMessage = ""
+
+    /** Revisa cada 2 s si llegan muestras y con qué nivel, para decir el motivo exacto. */
+    private val diagnose = object : Runnable {
+        override fun run() {
+            val capture = system ?: return
+            val buffers = capture.buffers
+            val peak = capture.takePeak()
+            val db = if (peak > 0f) {
+                (20.0 * log10(peak.toDouble())).toInt().coerceIn(-120, 0)
+            } else {
+                -120
+            }
+            onSystemDetail?.invoke(
+                if (buffers == 0L) {
+                    "Muestras recibidas: 0 · ${capture.formatLabel}"
+                } else {
+                    "Muestras: $buffers · nivel $db dBFS · ${capture.formatLabel}"
+                }
+            )
+            val failure = capture.failure
+            val message = when {
+                failure != null -> failure
+                buffers == 0L ->
+                    "La captura está activa pero Android no entrega muestras: deja sonando algo y, " +
+                        "si sigue así, detén y vuelve a iniciar"
+
+                peak < 0.0005f ->
+                    "Llega silencio: la app que suena bloquea su audio (allowAudioPlaybackCapture) " +
+                        "o no está reproduciendo nada. Prueba con YouTube o un reproductor"
+
+                else -> "Enviando el audio del sistema por NDI · nivel $db dBFS"
+            }
+            if (message != lastSystemMessage) {
+                lastSystemMessage = message
+                onStatus?.invoke(message)
+            }
+            handler.postDelayed(this, 2000)
         }
     }
 
@@ -95,31 +140,37 @@ class AudioNdiSource(private val context: Context) {
         val created = createSender(name) ?: return false
         sender = created
         audioChunks = 0
-        val capture = SystemAudioCapture(projection) { pcm, samples, channels, rate ->
+        val capture = SystemAudioCapture(
+            projection,
+            onError = { message ->
+                lastSystemMessage = message
+                onStatus?.invoke(message)
+            }
+        ) { pcm, samples, channels, rate ->
             audioChunks++
             sender?.sendAudio(pcm, samples, channels, rate)
         }
         if (!capture.start()) {
+            val reason = capture.failure ?: "No se pudo capturar el audio del sistema"
             created.close()
             sender = null
-            onStatus?.invoke("No se pudo capturar el audio del sistema")
+            onStatus?.invoke(reason)
             return false
         }
         system = capture
+        lastSystemMessage = ""
         handler.post(pump)
-        onStatus?.invoke("Enviando el audio del sistema por NDI")
-        handler.postDelayed({
-            if (system === capture && audioChunks == 0) {
-                onStatus?.invoke(
-                    "No llega audio del sistema: la app que suena puede bloquear la captura"
-                )
-            }
-        }, 4000)
+        handler.postDelayed(diagnose, 1500)
         return true
     }
 
     fun stop() {
         handler.removeCallbacks(pump)
+        handler.removeCallbacks(diagnose)
+        if (system != null) {
+            lastSystemMessage = ""
+            onSystemDetail?.invoke("")
+        }
         mic?.stop()
         mic = null
         system?.stop()
@@ -128,6 +179,7 @@ class AudioNdiSource(private val context: Context) {
         file = null
         sender?.close()
         sender = null
+        audioChunks = 0
     }
 
     private fun createSender(name: String): NdiSender? {

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -21,12 +22,16 @@ import com.ndiapp.camera.media.AudioNdiSource
  * Usa captura de reproducción (AudioPlaybackCapture) sobre una MediaProjection
  * sin VirtualDisplay: no se comparte la pantalla. Desde Android 14 hace falta un
  * servicio en primer plano de tipo mediaProjection antes de crear la proyección.
+ *
+ * [status] guarda el motivo exacto en lenguaje claro (permiso, proyección
+ * detenida, app que bloquea su audio…) y [detail] los datos técnicos.
  */
 class SystemAudioService : Service() {
 
     companion object {
         val running = mutableStateOf(false)
         val status = mutableStateOf("")
+        val detail = mutableStateOf("")
 
         private const val CHANNEL_ID = "ndi_system_audio"
         private const val NOTIFICATION_ID = 43
@@ -46,23 +51,30 @@ class SystemAudioService : Service() {
 
     private var projection: MediaProjection? = null
     private var source: AudioNdiSource? = null
+    private var stoppedByUser = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                stoppedByUser = true
+                status.value = "Captura de audio detenida"
+                detail.value = ""
                 stopSelf()
                 return START_NOT_STICKY
             }
 
             ACTION_START -> {
-                startForeground(NOTIFICATION_ID, buildNotification())
+                stoppedByUser = false
+                status.value = "Iniciando la captura de audio…"
+                detail.value = ""
+                startForegroundCompat()
                 @Suppress("DEPRECATION")
-                val data = intent.getParcelableExtra<Intent>("resultData")
-                val resultCode = intent.getIntExtra("resultCode", 0)
+                val data = intent?.getParcelableExtra<Intent>("resultData")
+                val resultCode = intent?.getIntExtra("resultCode", 0) ?: 0
                 if (data == null) {
-                    status.value = "No se recibió el permiso de captura"
+                    status.value = "No se recibió el permiso de captura; vuelve a pulsar Iniciar"
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -73,10 +85,20 @@ class SystemAudioService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                val created = runCatching { manager.getMediaProjection(resultCode, data) }
-                    .getOrNull()
+                val outcome = runCatching { manager.getMediaProjection(resultCode, data) }
+                val created = outcome.getOrNull()
                 if (created == null) {
-                    status.value = "No se pudo crear la captura de audio"
+                    val error = outcome.exceptionOrNull()
+                    status.value = when (error) {
+                        is SecurityException ->
+                            "Android denegó la proyección: inicia el servicio antes de pedirla o " +
+                                "vuelve a conceder la captura en el diálogo del sistema"
+
+                        else ->
+                            "No se pudo crear la captura de audio" +
+                                (error?.javaClass?.simpleName?.let { " ($it)" } ?: "")
+                    }
+                    detail.value = error?.message ?: ""
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -84,6 +106,11 @@ class SystemAudioService : Service() {
                 created.registerCallback(
                     object : MediaProjection.Callback() {
                         override fun onStop() {
+                            status.value =
+                                "La proyección se detuvo: pudo ser el bloqueo de pantalla, otra " +
+                                    "captura iniciada por el sistema o el chip de captura de Android. " +
+                                    "Vuelve a pulsar Iniciar"
+                            detail.value = ""
                             stopSelf()
                         }
                     },
@@ -92,6 +119,7 @@ class SystemAudioService : Service() {
 
                 val audio = AudioNdiSource(this)
                 audio.onStatus = { message -> status.value = message }
+                audio.onSystemDetail = { message -> detail.value = message }
                 source = audio
                 val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     audio.startSystemAudio(created, "NDI App Audio sistema (${Build.MODEL})")
@@ -105,16 +133,42 @@ class SystemAudioService : Service() {
                 }
                 running.value = true
             }
+
+            else -> {
+                // Reinicio del sistema sin el permiso original: no se puede reanudar.
+                status.value = "La captura se interrumpió; vuelve a pulsar Iniciar"
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
         return START_STICKY
     }
 
+    private fun startForegroundCompat() {
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
     override fun onDestroy() {
         running.value = false
+        detail.value = ""
+        source?.onStatus = null
+        source?.onSystemDetail = null
         source?.stop()
         source = null
         runCatching { projection?.stop() }
         projection = null
+        if (!stoppedByUser && status.value.isEmpty()) {
+            status.value = "La captura de audio se detuvo"
+        }
         super.onDestroy()
     }
 

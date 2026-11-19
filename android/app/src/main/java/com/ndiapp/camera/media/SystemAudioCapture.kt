@@ -10,15 +10,19 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 
 /**
- * Captura el audio que reproducen otras apps (vídeo, música, navegador) mientras se
- * comparte la pantalla, y lo entrega como PCM float intercalado a 48 kHz.
+ * Captura el audio que reproducen otras apps (vídeo, música, navegador) y lo
+ * entrega como PCM float intercalado a 48 kHz.
  *
  * Requiere Android 10 (API 29) y una [MediaProjection] activa. Las apps pueden
- * excluir su audio de la captura; en ese caso se oye silencio, no un error.
+ * excluir su audio de la captura; en ese caso se oye silencio, no un error, así
+ * que además de las muestras se expone [buffers], [takePeak] y [failure] para
+ * poder decir en la interfaz qué está pasando exactamente.
  */
 @RequiresApi(Build.VERSION_CODES.Q)
 class SystemAudioCapture(
     private val projection: MediaProjection,
+    /** Motivo exacto de un fallo de captura, para mostrarlo en la interfaz. */
+    private val onError: ((String) -> Unit)? = null,
     private val onBuffer: (pcm: FloatArray, samples: Int, channels: Int, sampleRate: Int) -> Unit
 ) {
 
@@ -36,8 +40,35 @@ class SystemAudioCapture(
     @Volatile
     private var running = false
 
+    /** Búferes entregados por Android desde el inicio (0 = no llegan muestras). */
+    @Volatile
+    var buffers: Long = 0L
+        private set
+
+    /** Motivo del fallo, o null mientras la captura siga viva. */
+    @Volatile
+    var failure: String? = null
+        private set
+
+    @Volatile
+    private var peakWindow: Float = 0f
+
+    /** Descripción del formato aceptado por el dispositivo. */
+    val formatLabel: String
+        get() = "48 kHz estéreo · ${if (floatEncoding) "float" else "16 bits"}"
+
+    /** Nivel máximo recibido desde la llamada anterior, en valor absoluto. */
+    fun takePeak(): Float {
+        val peak = peakWindow
+        peakWindow = 0f
+        return peak
+    }
+
     fun start(): Boolean {
         if (running) return true
+        buffers = 0L
+        failure = null
+        peakWindow = 0f
 
         val config = try {
             AudioPlaybackCaptureConfiguration.Builder(projection)
@@ -47,18 +78,37 @@ class SystemAudioCapture(
                 .build()
         } catch (t: Throwable) {
             Log.w(TAG, "No se pudo configurar la captura de reproducción", t)
+            fail(
+                if (t is SecurityException) {
+                    "Android denegó la captura de reproducción: falta el permiso de micrófono " +
+                        "(RECORD_AUDIO) o la proyección ya no es válida"
+                } else {
+                    "No se pudo configurar la captura de reproducción (${t.javaClass.simpleName})"
+                }
+            )
             return false
         }
 
         val recorder = open(config, AudioFormat.ENCODING_PCM_FLOAT)
             ?: open(config, AudioFormat.ENCODING_PCM_16BIT)?.also { floatEncoding = false }
-            ?: return false
+        if (recorder == null) {
+            fail("Este dispositivo no permite capturar el audio de otras apps (AudioRecord no se pudo crear)")
+            return false
+        }
 
         record = recorder
-        val started = runCatching { recorder.startRecording() }.isSuccess &&
-            recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        val startError = runCatching { recorder.startRecording() }.exceptionOrNull()
+        val started = startError == null && recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING
         if (!started) {
-            Log.w(TAG, "AudioRecord de reproducción no arrancó")
+            Log.w(TAG, "AudioRecord de reproducción no arrancó", startError)
+            fail(
+                if (startError is SecurityException) {
+                    "Android denegó el inicio de la captura: el permiso de micrófono no está concedido"
+                } else {
+                    "Android no dejó iniciar la captura de reproducción" +
+                        (startError?.javaClass?.simpleName?.let { " ($it)" } ?: "")
+                }
+            )
             stop()
             return false
         }
@@ -70,11 +120,30 @@ class SystemAudioCapture(
                 while (running) {
                     val read = runCatching {
                         recorder.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
-                    }.getOrDefault(-1)
-                    if (read > 0) {
-                        onBuffer(buffer.copyOf(read), read / CHANNELS, CHANNELS, SAMPLE_RATE)
-                    } else if (read < 0) {
-                        break
+                    }.getOrDefault(Int.MIN_VALUE)
+                    when {
+                        read > 0 -> {
+                            var peak = 0f
+                            for (i in 0 until read) {
+                                val value = if (buffer[i] < 0f) -buffer[i] else buffer[i]
+                                if (value > peak) peak = value
+                            }
+                            if (peak > peakWindow) peakWindow = peak
+                            buffers++
+                            onBuffer(buffer.copyOf(read), read / CHANNELS, CHANNELS, SAMPLE_RATE)
+                        }
+
+                        read == 0 -> Unit
+
+                        read == Int.MIN_VALUE -> {
+                            fail("Android rechazó la lectura del audio de reproducción")
+                            break
+                        }
+
+                        else -> {
+                            fail(describe(read))
+                            break
+                        }
                     }
                 }
             } else {
@@ -82,13 +151,33 @@ class SystemAudioCapture(
                 while (running) {
                     val read = runCatching {
                         recorder.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
-                    }.getOrDefault(-1)
-                    if (read > 0) {
-                        val pcm = FloatArray(read)
-                        for (i in 0 until read) pcm[i] = buffer[i] / 32768f
-                        onBuffer(pcm, read / CHANNELS, CHANNELS, SAMPLE_RATE)
-                    } else if (read < 0) {
-                        break
+                    }.getOrDefault(Int.MIN_VALUE)
+                    when {
+                        read > 0 -> {
+                            val pcm = FloatArray(read)
+                            var peak = 0f
+                            for (i in 0 until read) {
+                                val sample = buffer[i] / 32768f
+                                pcm[i] = sample
+                                val value = if (sample < 0f) -sample else sample
+                                if (value > peak) peak = value
+                            }
+                            if (peak > peakWindow) peakWindow = peak
+                            buffers++
+                            onBuffer(pcm, read / CHANNELS, CHANNELS, SAMPLE_RATE)
+                        }
+
+                        read == 0 -> Unit
+
+                        read == Int.MIN_VALUE -> {
+                            fail("Android rechazó la lectura del audio de reproducción")
+                            break
+                        }
+
+                        else -> {
+                            fail(describe(read))
+                            break
+                        }
                     }
                 }
             }
@@ -98,6 +187,28 @@ class SystemAudioCapture(
             it.start()
         }
         return true
+    }
+
+    private fun describe(code: Int): String = when (code) {
+        AudioRecord.ERROR_INVALID_OPERATION ->
+            "Android rechazó la lectura del audio (ERROR_INVALID_OPERATION): detén y vuelve a iniciar la captura"
+
+        AudioRecord.ERROR_BAD_VALUE ->
+            "Android rechazó el formato de audio (ERROR_BAD_VALUE)"
+
+        AudioRecord.ERROR_DEAD_OBJECT ->
+            "Android cerró la captura de audio (ERROR_DEAD_OBJECT): vuelve a iniciar"
+
+        AudioRecord.ERROR ->
+            "Error al leer el audio de reproducción (ERROR)"
+
+        else -> "La captura de audio falló (código $code)"
+    }
+
+    private fun fail(message: String) {
+        failure = message
+        Log.w(TAG, message)
+        onError?.invoke(message)
     }
 
     private fun open(config: AudioPlaybackCaptureConfiguration, encoding: Int): AudioRecord? {
