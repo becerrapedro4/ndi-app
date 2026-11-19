@@ -2275,6 +2275,8 @@ private fun MonitorTab(onMenu: () -> Unit) {
     var audio by remember { mutableStateOf(true) }
     var frameSeq by remember { mutableIntStateOf(0) }
     var fullscreen by remember { mutableStateOf(false) }
+    var clean by rememberSaveable { mutableStateOf(false) }
+    var cleanHint by remember { mutableStateOf(false) }
     var stats by remember { mutableStateOf(StreamStats()) }
     var proxy by remember { mutableStateOf(false) }
     var guides by remember { mutableIntStateOf(0) }
@@ -2300,13 +2302,26 @@ private fun MonitorTab(onMenu: () -> Unit) {
         )
     }
 
-    // Pantalla completa: se ocultan cabecera, lista y barras del sistema.
-    LaunchedEffect(fullscreen) {
-        setSystemBarsVisible(activity, !fullscreen)
+    // Pantalla completa y vista limpia ocultan cabecera, lista y barras del sistema.
+    LaunchedEffect(fullscreen, clean) {
+        setSystemBarsVisible(activity, !(fullscreen || clean))
     }
-    // Al dejar de recibir una fuente se sale de pantalla completa.
+    // La vista limpia deja solo la imagen: un aviso breve recuerda cómo salir.
+    LaunchedEffect(clean) {
+        if (!clean) {
+            cleanHint = false
+            return@LaunchedEffect
+        }
+        cleanHint = true
+        delay(2200)
+        cleanHint = false
+    }
+    // Al dejar de recibir una fuente se sale de pantalla completa y de la vista limpia.
     LaunchedEffect(playing) {
-        if (playing == null) fullscreen = false
+        if (playing == null) {
+            fullscreen = false
+            clean = false
+        }
     }
     DisposableEffect(Unit) {
         onDispose { setSystemBarsVisible(activity, true) }
@@ -2327,7 +2342,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        if (!fullscreen) TopBar(
+        if (!fullscreen && !clean) TopBar(
             modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
             trailing = {
                 Text(
@@ -2342,7 +2357,21 @@ private fun MonitorTab(onMenu: () -> Unit) {
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val landscape = maxWidth > maxHeight
             val viewer: @Composable (Modifier) -> Unit = { modifier ->
-                Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier
+                        .background(Color.Black)
+                        .then(
+                            // En vista limpia toda la imagen es el botón de salida.
+                            if (clean) {
+                                Modifier.pointerInput(Unit) {
+                                    detectTapGestures { clean = false }
+                                }
+                            } else {
+                                Modifier
+                            }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
                     val current = frame
                     val tick = frameSeq
                     if (current != null) {
@@ -2354,49 +2383,65 @@ private fun MonitorTab(onMenu: () -> Unit) {
                     } else {
                         Text("Sin señal", color = Color(0xFF6B7785))
                     }
-                    Row(
-                        Modifier
-                            .align(Alignment.TopStart)
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        GlassChip("Menú", false) { onMenu() }
-                        StatusPill(
-                            running = playing != null,
-                            text = playing?.name ?: "Monitor NDI"
-                        )
-                    }
-                    Row(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (playing != null) {
-                            GlassChip(
-                                if (fullscreen) "Salir" else "Pantalla completa",
-                                fullscreen
-                            ) { fullscreen = !fullscreen }
+                    if (!clean) {
+                        Row(
+                            Modifier
+                                .align(Alignment.TopStart)
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            GlassChip("Menú", false) { onMenu() }
+                            StatusPill(
+                                running = playing != null,
+                                text = playing?.name ?: "Monitor NDI"
+                            )
                         }
-                    }
-                    GuidesOverlay(guides)
-                    if (playing != null) {
-                        LevelMeter(
-                            left = stats.levelLeft,
-                            right = stats.levelRight,
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(14.dp)
-                        )
+                        Row(
+                            Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (playing != null) {
+                                GlassChip("Vista limpia", false) { clean = true }
+                                GlassChip(
+                                    if (fullscreen) "Salir" else "Pantalla completa",
+                                    fullscreen
+                                ) { fullscreen = !fullscreen }
+                            }
+                        }
+                        GuidesOverlay(guides)
+                        if (playing != null) {
+                            LevelMeter(
+                                left = stats.levelLeft,
+                                right = stats.levelRight,
+                                modifier = Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(14.dp)
+                            )
+                            Text(
+                                "${String.format("%.1f", stats.fps)} fps · " +
+                                    "${String.format("%.1f", stats.mbps)} Mb/s",
+                                fontSize = 10.sp,
+                                color = NdiGlass.Muted,
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(14.dp)
+                            )
+                        }
+                    } else if (cleanHint) {
                         Text(
-                            "${String.format("%.1f", stats.fps)} fps · " +
-                                "${String.format("%.1f", stats.mbps)} Mb/s",
-                            fontSize = 10.sp,
-                            color = NdiGlass.Muted,
+                            "Vista limpia · toca la imagen para salir",
+                            fontSize = 11.sp,
+                            color = Color.White,
                             modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(14.dp)
+                                .align(Alignment.BottomCenter)
+                                .padding(18.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0x66000000))
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
                         )
                     }
                 }
@@ -2598,7 +2643,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
                 }
             }
 
-            if (fullscreen) {
+            if (fullscreen || clean) {
                 viewer(Modifier.fillMaxSize())
             } else if (landscape) {
                 Row(Modifier.fillMaxSize()) {

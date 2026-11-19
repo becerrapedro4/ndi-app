@@ -2,7 +2,8 @@
 
 Fuente NDI para Android: cámara, pantalla, archivos multimedia, cámara USB (UVC), micrófono y
 audio del sistema. Incluye un monitor NDI con herramientas de campo (guías, medidor de nivel,
-estadísticas de flujo y modo proxy) y una página de descarga en `web/`.
+estadísticas de flujo, modo proxy y vista limpia a pantalla completa) y una página de descarga
+en `web/`.
 
 ## Contenido del repositorio
 
