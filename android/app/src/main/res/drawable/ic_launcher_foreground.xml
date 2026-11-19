@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- El wordmark se escala al 78% para que entre entero en la máscara circular. -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.78"
+        android:scaleY="0.78">
+        <!-- N -->
+        <path
+            android:pathData="M26,70 L26,38 L44,70 L44,38"
+            android:strokeColor="#EEF6FF"
+            android:strokeWidth="6.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <!-- D -->
+        <path
+            android:pathData="M52,38 L58,38 C68,38 74,45 74,54 C74,63 68,70 58,70 L52,70"
+            android:strokeColor="#EEF6FF"
+            android:strokeWidth="6.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M52,38 L52,70"
+            android:strokeColor="#EEF6FF"
+            android:strokeWidth="6.5"
+            android:strokeLineCap="round" />
+        <!-- I de acento -->
+        <path
+            android:pathData="M84,38 L84,70"
+            android:strokeColor="#4FA9FF"
+            android:strokeWidth="7.2"
+            android:strokeLineCap="round" />
+    </group>
+</vector>

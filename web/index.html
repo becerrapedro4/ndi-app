@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NDI App — Cámara, pantalla y audio NDI desde tu móvil</title>
+<meta name="description" content="NDI App convierte tu teléfono o tablet en una fuente NDI profesional: cámara 1080p, captura de pantalla con audio del sistema y micrófono por Wi-Fi o Ethernet." />
+<link rel="icon" type="image/png" href="app-icon.png" />
+<link rel="apple-touch-icon" href="app-icon.png" />
+<style>
+  :root{
+    --bg:#04070d;
+    --text:#eaf2fc;
+    --muted:#9eb0c6;
+    --blue:#3e9bff;
+    --blue-bright:#8ccbff;
+    --glass:rgba(255,255,255,.07);
+    --glass-strong:rgba(255,255,255,.12);
+    --stroke:rgba(255,255,255,.16);
+    --green:#4ade80;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1100px 700px at 85% -10%, rgba(62,155,255,.28), transparent 60%),
+      radial-gradient(900px 600px at 5% 10%, rgba(62,155,255,.12), transparent 55%),
+      radial-gradient(800px 500px at 50% 110%, rgba(140,203,255,.10), transparent 60%),
+      var(--bg);
+    background-attachment:fixed;
+    color:var(--text);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--blue-bright);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+
+  header{
+    position:sticky;top:0;z-index:10;
+    border-bottom:1px solid rgba(255,255,255,.08);
+    background:rgba(4,7,13,.55);
+    backdrop-filter:blur(18px) saturate(140%);
+    -webkit-backdrop-filter:blur(18px) saturate(140%);
+  }
+  .nav{display:flex;align-items:center;gap:16px;height:64px}
+  .logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.2px}
+  .logo .dot{width:10px;height:10px;border-radius:50%;background:var(--blue);box-shadow:0 0 16px var(--blue)}
+  .nav nav{margin-left:auto;display:flex;gap:20px;font-size:14px}
+  .nav nav a{color:var(--muted)}
+  .nav nav a:hover{color:var(--text);text-decoration:none}
+
+  .hero{padding:72px 0 44px;display:grid;grid-template-columns:1.12fr .88fr;gap:48px;align-items:center}
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--blue-bright);
+    border:1px solid rgba(62,155,255,.35);
+    background:rgba(62,155,255,.12);
+    backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    padding:6px 12px;border-radius:999px;margin-bottom:18px;
+  }
+  h1{font-size:clamp(30px,4vw,50px);line-height:1.08;margin:0 0 18px;letter-spacing:-.02em}
+  h1 span{
+    background:linear-gradient(180deg,#cfe9ff,#6ebbff);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .lead{color:var(--muted);font-size:18px;margin:0 0 26px;max-width:56ch}
+  .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+  .btn{
+    display:inline-flex;align-items:center;gap:10px;padding:14px 22px;border-radius:14px;
+    font-weight:650;border:1px solid transparent;transition:transform .15s ease, background .15s ease;
+  }
+  .btn:hover{transform:translateY(-1px);text-decoration:none}
+  .btn-primary{
+    background:linear-gradient(180deg,#79c8ff,#1d78de);color:#03121f;
+    box-shadow:0 14px 40px rgba(62,155,255,.35), inset 0 1px 0 rgba(255,255,255,.5);
+  }
+  .btn-ghost{
+    border-color:var(--stroke);color:var(--text);
+    background:var(--glass);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  }
+  .meta{font-size:13px;color:var(--muted);margin-top:14px}
+
+  .phone{
+    position:relative;
+    background:linear-gradient(160deg, rgba(255,255,255,.14), rgba(255,255,255,.04));
+    border:1px solid var(--stroke);
+    border-radius:30px;padding:18px;
+    box-shadow:0 40px 90px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.35);
+    backdrop-filter:blur(20px) saturate(140%);-webkit-backdrop-filter:blur(20px) saturate(140%);
+  }
+  .screen{background:rgba(2,6,12,.75);border:1px solid rgba(255,255,255,.12);border-radius:20px;overflow:hidden}
+  .screen .bar{
+    display:flex;align-items:center;gap:8px;padding:10px 14px;
+    border-bottom:1px solid rgba(255,255,255,.09);font-size:12px;color:var(--muted);
+  }
+  .screen .bar .live{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+  .screen .bar .mark{font-size:17px;font-weight:800;letter-spacing:-.03em;color:#fff}
+  .screen .bar .mark sup{font-size:7px;opacity:.7;margin-left:1px}
+  .screen .bar .hamb{margin-left:auto;display:grid;gap:3px;padding:6px}
+  .screen .bar .hamb i{display:block;width:16px;height:1.6px;border-radius:2px;background:#eaf2fc}
+  .screen .frame{
+    aspect-ratio:16/9;display:grid;place-items:center;position:relative;
+    background:
+      linear-gradient(90deg,rgba(255,255,255,.07) 1px,transparent 1px) 0 0/33.33% 100%,
+      linear-gradient(rgba(255,255,255,.07) 1px,transparent 1px) 0 0/100% 33.33%,
+      radial-gradient(circle at 50% 45%, #16324f, #04070d 72%);
+  }
+  .screen .frame span{font-size:11px;color:#8fb6dd;letter-spacing:.14em;text-transform:uppercase}
+  .screen .frame .badge{
+    position:absolute;top:10px;left:10px;display:flex;align-items:center;gap:6px;
+    font-size:11px;letter-spacing:.04em;color:#dcedff;text-transform:none;
+    background:rgba(4,10,18,.55);border:1px solid rgba(255,255,255,.18);
+    padding:4px 10px;border-radius:999px;backdrop-filter:blur(10px);
+  }
+  .screen .frame .badge i{width:6px;height:6px;border-radius:50%;background:var(--green);display:block}
+  .screen .dock{
+    position:relative;margin:-44px 10px 12px;display:flex;gap:4px;justify-content:center;
+    align-items:center;padding:7px;border-radius:18px;
+    background:rgba(3,7,13,.72);border:1px solid rgba(255,255,255,.16);
+    backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    box-shadow:0 12px 30px rgba(0,0,0,.5);
+  }
+  .screen .dock b{
+    font-size:9.5px;font-weight:600;color:rgba(234,242,252,.78);padding:4px 6px;border-radius:10px;
+    text-align:center;line-height:1.2;
+  }
+  .screen .dock b span{display:block;font-size:13px;line-height:1.1;opacity:.9}
+  .screen .dock b.on{color:var(--blue-bright)}
+  .screen .dock b.ndi{
+    padding:6px 12px;border-radius:11px;font-size:13px;font-weight:800;letter-spacing:-.03em;
+    background:linear-gradient(180deg,#79c8ff,#1d78de);color:#03121f;
+    box-shadow:0 8px 20px rgba(62,155,255,.4), inset 0 1px 0 rgba(255,255,255,.5);
+  }
+  .rows{display:grid;gap:8px;padding:6px 14px 14px}
+  .row{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted)}
+  .row b{color:var(--text);font-weight:600}
+
+  section{padding:58px 0;border-top:1px solid rgba(255,255,255,.08)}
+  h2{font-size:clamp(22px,2.6vw,30px);margin:0 0 8px;letter-spacing:-.01em}
+  .section-lead{color:var(--muted);margin:0 0 28px;max-width:70ch}
+
+  .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  .card{
+    background:var(--glass);
+    border:1px solid var(--stroke);
+    border-radius:20px;padding:22px;
+    box-shadow:0 24px 60px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.18);
+    backdrop-filter:blur(18px) saturate(140%);-webkit-backdrop-filter:blur(18px) saturate(140%);
+  }
+  .card h3{margin:0 0 12px;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--blue-bright)}
+  .card ul{margin:0;padding-left:18px;color:var(--muted)}
+  .card li{margin:7px 0}
+  .card li strong{color:var(--text);font-weight:600}
+
+  table{
+    width:100%;border-collapse:separate;border-spacing:0;font-size:15px;
+    background:var(--glass);border:1px solid var(--stroke);border-radius:20px;overflow:hidden;
+    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  }
+  th,td{text-align:left;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.08);vertical-align:top}
+  th{font-size:12.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);background:var(--glass-strong);font-weight:600}
+  tr:last-child td{border-bottom:none}
+  td:first-child{color:var(--text);font-weight:600;width:34%}
+  td{color:var(--muted)}
+  .ok{color:var(--green);font-weight:600}
+
+  .steps{display:grid;gap:14px;counter-reset:step}
+  .step{
+    display:grid;grid-template-columns:38px 1fr;gap:14px;align-items:start;
+    background:var(--glass);border:1px solid var(--stroke);border-radius:18px;padding:16px 18px;
+    backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  }
+  .step::before{
+    counter-increment:step;content:counter(step);display:grid;place-items:center;
+    width:32px;height:32px;border-radius:12px;
+    background:rgba(62,155,255,.18);color:var(--blue-bright);font-weight:700;
+    border:1px solid rgba(62,155,255,.4);
+  }
+  .step p{margin:0;color:var(--muted)}
+  .step b{color:var(--text)}
+
+  .notice{
+    background:rgba(62,155,255,.10);border:1px solid rgba(62,155,255,.32);
+    border-radius:18px;padding:18px 20px;color:var(--muted);font-size:14.5px;
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  }
+  footer{border-top:1px solid rgba(255,255,255,.08);padding:34px 0 50px;color:var(--muted);font-size:13px}
+  footer p{margin:6px 0}
+  code{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:6px;padding:2px 6px;font-size:13px;color:#cfe6fb}
+
+  .btn-mini{padding:8px 14px;border-radius:11px;font-size:13px;margin-left:10px;white-space:nowrap}
+
+  /* En landscape el alto es escaso: se compacta la cabecera y el hero para que
+     el botón de descarga quede siempre a la vista. */
+  @media (orientation:landscape) and (max-height:620px){
+    .nav{height:54px}
+    .hero{padding:20px 0 26px;gap:22px}
+    h1{font-size:clamp(24px,3.2vw,34px);margin-bottom:12px}
+    .lead{font-size:15px;margin-bottom:16px}
+    .eyebrow{margin-bottom:12px}
+    .phone{display:none}
+  }
+
+  @media (max-width:860px){
+    .hero{grid-template-columns:1fr;padding-top:40px;gap:32px}
+    .grid-3{grid-template-columns:1fr}
+    .nav nav{display:none}
+    th,td{padding:12px}
+    td:first-child{width:42%}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <div class="logo"><span class="dot"></span>NDI App</div>
+    <nav>
+      <a href="#fuentes">Fuentes</a>
+      <a href="#compatibilidad">Compatibilidad</a>
+      <a href="#instalar">Instalar</a>
+      <a href="#monitor">Monitor NDI</a>
+    </nav>
+    <a class="btn btn-primary btn-mini" href="download/NDI-App-1.8.0.apk" download>Descargar APK</a>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <div>
+      <span class="eyebrow">Android · NDI® por Wi-Fi · v1.8.0</span>
+      <h1>Tu móvil como <span>cámara, pantalla y audio</span> NDI.</h1>
+      <p class="lead">
+        NDI App envía video y audio directamente a vMix, OBS, TriCaster, NDI Studio Monitor y
+        cualquier software compatible con NDI: sin placa capturadora, sin cables, solo Wi-Fi o
+        Ethernet.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="download/NDI-App-1.8.0.apk" download>
+          Descargar APK · 6,1 MB
+        </a>
+        <a class="btn btn-ghost" href="#compatibilidad">Ver compatibilidad</a>
+      </div>
+      <p class="meta">Android 8.0 o superior · arm64-v8a y armeabi-v7a · versión 1.8.0 · portrait y landscape</p>
+    </div>
+
+    <div class="phone">
+      <div class="screen">
+        <div class="bar">
+          <span class="mark">NDI<sup>®</sup></span>
+          <span class="hamb"><i></i><i></i><i></i></span>
+        </div>
+        <div class="frame">
+          <span class="badge"><i></i> NDI App (Phone)</span>
+          <span>1080p · 60 fps</span>
+        </div>
+        <div class="dock">
+          <b class="on"><span>▦</span>Grilla</b><b class="ndi">NDI</b><b>Grabar</b>
+          <b class="on"><span>◉</span>Mic</b><b>1×</b><b>Girar</b><b>1080p60</b><b>Ocultar</b>
+        </div>
+        <div class="rows">
+          <div class="row"><span>Cámara</span><b>Trasera · 1080p</b></div>
+          <div class="row"><span>Audio</span><b>Micrófono · 48 kHz</b></div>
+          <div class="row"><span>Zoom digital</span><b>2.4×</b></div>
+          <div class="row"><span>Exposición</span><b>+0.5 EV</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section id="fuentes">
+    <div class="wrap">
+      <h2>Tres fuentes, una app</h2>
+      <p class="section-lead">
+        Cada fuente aparece como un nombre propio en la red, así que puedes añadirla a la mezcla
+        como cualquier otra entrada NDI.
+      </p>
+      <div class="grid-3">
+        <div class="card">
+          <h3>Fuentes</h3>
+          <ul>
+            <li><strong>Cámara trasera con sus lentes</strong> (ultra gran angular, principal y tele) y <strong>frontal</strong>, hasta 1080p</li>
+            <li><strong>Captura de pantalla completa</strong> del dispositivo</li>
+            <li><strong>Audio del sistema</strong> al compartir pantalla (Android 10+)</li>
+            <li><strong>Micrófono</strong> como fuente de audio</li>
+            <li><strong>Listas de reproducción</strong> con vídeos, fotos y audios emitidas como fuente NDI desde el menú Multimedia, con pausa, búsqueda, anterior, siguiente y bucle</li>
+            <li><strong>Fuente de solo audio</strong>: el micrófono o un archivo de audio desde el menú Audio</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Controles de cámara</h3>
+          <ul>
+            <li><strong>Visor a pantalla completa</strong> en portrait y landscape, con la cámara siempre encendida: se ve aunque no estés emitiendo. Al transmitir queda una línea roja fija en el borde superior y, cuando otro equipo está recibiendo la fuente, un <strong>tally fijo bajo la cabecera</strong>, encendido sin parpadeo ni halo animado</li>
+            <li><strong>Menú hamburguesa (☰)</strong> para entrar a la transmisión, la pantalla y el monitor NDI</li>
+            <li><strong>Dock inferior</strong>: Grilla, Streaming, Grabar, Mic, Linterna (rayo), lente trasera, cambiar de cámara, calidad, Ocultar y Pro, con todo a mano en el visor. En landscape ocupa el ancho disponible y reparte los controles a partes iguales; en portrait se desplaza en horizontal</li>
+            <li><strong>Grabación local</strong> de la vista previa en MP4 (Películas/NDI App) con contador REC en la esquina superior izquierda</li>
+            <li><strong>Zoom con dos dedos</strong> sobre la imagen y <strong>foco al tocar</strong> el objeto que quieras enfocar</li>
+            <li><strong>Controles pro en el visor</strong>: tira con EV, obturación, ISO, balance de blancos y foco siempre a la vista, cada uno con su marca <b>A</b> de automático; se ajustan con una regla de marcas, de paso en paso, y el botón <b>A</b> devuelve el elegido a automático. El EV arranca en <strong>0 centrado</strong>, negativos a la izquierda y positivos a la derecha, rotulado en la regla; ISO de <strong>80 a 6400</strong>; la obturación recorre el <strong>rango real del sensor</strong> (hasta 1/8000 s) limitado por la velocidad de cuadros</li>
+            <li><strong>ISO y obturación con automático real</strong>: al mover uno, el otro se ajusta solo midiendo el brillo del cuadro, así el vídeo no salta a negro ni a blanco</li>
+            <li><strong>1080p o 720p</strong> a 30 o 60 fps</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Monitor NDI</h3>
+          <ul>
+            <li><strong>Descubre fuentes</strong> NDI en tu red</li>
+            <li><strong>Mira cualquier fuente</strong> con audio, a tamaño de panel o <strong>a pantalla completa</strong> con el botón del visor, que oculta cabecera, lista y barras del sistema</li>
+            <li><strong>Envía y recibe</strong> a la vez desde el mismo móvil</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="compatibilidad">
+    <div class="wrap">
+      <h2>Compatibilidad Android</h2>
+      <p class="section-lead">
+        Requisitos del dispositivo, de la red y del software receptor. Todo lo que aparece como
+        «compatible» está soportado por la app; lo que figura como limitación se indica tal cual.
+      </p>
+      <table>
+        <tbody>
+          <tr><td>Sistema operativo</td><td>Android 8.0 (API 26) o superior. Compilado contra Android 14 (API 34); la captura de pantalla usa el servicio en primer plano que exige Android 14.</td></tr>
+          <tr><td>Arquitectura</td><td>arm64-v8a (recomendada) y armeabi-v7a. No incluye x86/x86_64, por lo que no está pensada para emuladores.</td></tr>
+          <tr><td>Permisos</td><td>Cámara, micrófono, red local y captura de pantalla (MediaProjection, con confirmación del sistema cada vez que la inicias).</td></tr>
+          <tr><td>Interfaz</td><td><span class="ok">Nuevo en 1.8.0:</span> vista previa de Multimedia corregida (la lectura de píxeles se hacía con el framebuffer desenlazado y salía negra), menú propio para la cámara USB, fuentes NDI manuales por IP en el monitor, guías de encuadre, estadísticas de flujo, medidor de nivel y modo proxy. De 1.7.0: audio del sistema como fuente NDI (captura de reproducción, sin compartir pantalla), vista previa del reproductor en Multimedia, audio de las fuentes en el monitor NDI y botón de menú dentro del visor del monitor. De 1.6.0: captura UVC real como fuente NDI (MJPEG/YUY2, bulk o isocrono). De 1.5.0: punto rojo flotante al compartir pantalla (no sale en la fuente NDI porque usa una capa segura, requiere permiso de superposición), listas de reproducción con fotos y audio, y menú Audio para emitir solo sonido. De 1.4.1: el audio de los archivos de Multimedia viaja por la fuente NDI. De 1.4.0: menú <strong>Multimedia</strong> para emitir archivos de vídeo como fuente NDI con controles de reproducción, y detección de cámaras UVC conectadas por USB. La tira de controles pro es más compacta, sobre todo en landscape. De 1.3.4: el estado de la captura de pantalla ya no se pierde al cambiar de sección o al volver del segundo plano: la pestaña lee el estado real del servicio, así que el botón sigue en «Detener captura» mientras la fuente NDI está activa. De 1.3.3: regla de balance de blancos con todos los presets reales (2850 a 7500 K) y regla de foco más corta, 41 marcas de infinito al mínimo. De 1.3.2: tally fijo en la parte superior (sin el efecto latente del borde) y botón de pantalla completa en el monitor NDI. De 1.3.1 siguen la linterna (rayo) en el dock, el EV centrado en 0 con valores de −4 a +4 rotulados, el ISO de 80 a 6400 y el ISO/obturación automáticos al mover la otra. De 1.3.0: tally real cuando otro equipo recibe la fuente, grabación local con contador REC, selector de lentes traseras e icono de cambio de cámara con dos flechas. Ya no hay pantalla de ajustes ni botón «Fin»: todos los controles están en el visor, con menú hamburguesa para la pantalla y el monitor NDI. Dock adaptativo; en landscape reparte los controles a partes iguales y en portrait se desplaza.</td></tr>
+          <tr><td>Controles pro</td><td>Se abren desde el botón <b>Pro</b> del dock, sin salir del visor: EV de −4 a +4 (0 en el centro), ISO de 80 a 6400, velocidad de obturación, foco automático o manual por distancia y balance de blancos con todos los presets de la cámara, de 2850 a 7500 K, y foco manual en 41 marcas desde infinito hasta la distancia mínima del sensor. ISO y obturación son independientes: el que queda en automático compensa el brillo del cuadro. La lista de obturaciones sale del rango real del sensor, con el extremo lento en 1/fps (1/30 s a 30p, 1/60 s a 60p), porque un frame de vídeo no puede durar más que su periodo. Un toque en la imagen enfoca ese punto; el zoom se hace con el gesto de dos dedos.</td></tr>
+          <tr><td>Multimedia</td><td>Lista de reproducción con varios archivos de vídeo, fotos y audio: se añaden de una vez y se emiten en orden por la misma fuente NDI, con anterior, siguiente, pausa, búsqueda y bucle. MediaPlayer lleva el reloj del vídeo (frames leídos por OpenGL a 30 fps, con respaldo por MediaMetadataRetriever si el driver no entrega frames) y la pista de sonido se decodifica con MediaCodec: el PCM va a la fuente NDI y al altavoz, así que lo que se oye es lo que se emite. Las fotos duran 8 s; los archivos de audio se emiten con un cuadro negro de fondo.</td></tr>
+          <tr><td>Solo audio</td><td>El menú Audio publica el micrófono del teléfono, la pista de sonido de un archivo (en bucle) o <strong>el audio del sistema</strong> como fuente NDI independiente, sin vídeo propio: envía un cuadro negro para que los receptores la listen. El audio del sistema usa captura de reproducción (Android 10+) con una MediaProjection sin VirtualDisplay, así que no se comparte la pantalla.</td></tr>
+          <tr><td>Cámaras USB (UVC)</td><td>Captura real de cámaras USB con controlador propio: se leen los descriptores de clase del dispositivo, se reclama la interfaz de streaming, se negocia formato con VS Probe/Commit (MJPEG, o YUY2 sin comprimir), se elige el endpoint de mayor ancho de banda (bulk si existe, si no isocrono con 12 peticiones en vuelo), se rearman los frames con la cabecera de payload UVC (FID/EOF) y se decodifican a RGBA para la fuente NDI. Android no expone estas cámaras a Camera2, por eso el controlador va en la app.</td></tr>
+          <tr><td>Audio del sistema</td><td><span class="ok">Desde 1.1.0.</span> Captura lo que reproducen otras apps mientras compartes la pantalla (Android 10 o superior). Las apps pueden excluir su propio audio; en ese caso la fuente sale en silencio, sin error.</td></tr>
+          <tr><td>Red</td><td>Wi-Fi o Ethernet en la misma subred que el equipo receptor. NDI usa mDNS/multicast para el descubrimiento: evita redes de invitados, VLAN aisladas y el «aislamiento de cliente» del router.</td></tr>
+          <tr><td>Ajustes recomendados</td><td>5 GHz para 1080p60, mantener la pantalla encendida durante la emisión de cámara y desactivar el ahorro de batería agresivo del fabricante para no cortar el audio.</td></tr>
+          <tr><td>Recepción</td><td>vMix, OBS Studio con NDI, TriCaster, NDI Studio Monitor y NDI Tools, Wirecast, StreamYard, Zoom (NDI), hardware NewTek/Vizrt.</td></tr>
+          <tr><td>Monitor integrado</td><td>Reproduce cualquier fuente NDI estándar de la red: video y audio por el altavoz o los auriculares, en el panel del monitor o a pantalla completa con un toque en el botón del visor.</td></tr>
+          <tr><td>Formatos de salida</td><td>Video RGBA progresivo a 16:9, 1920×1080 o 1280×720, 30 o 60 fps. Audio PCM float intercalado, 48 kHz estéreo.</td></tr>
+          <tr><td>Limitaciones conocidas</td><td>La captura de pantalla se emite a 30 fps y con la orientación actual del dispositivo. Si el sistema detiene la captura (por ejemplo desde el aviso de privacidad), la app lo refleja y la fuente NDI desaparece. La cámara deja de enviar si Android suspende la app en segundo plano: usa el modo pantalla para emisiones largas.</td></tr>
+        </tbody>
+      </table>
+      <p class="meta">¿No aparece tu equipo? Cualquier software con soporte NDI 5/6 puede recibir estas fuentes.</p>
+    </div>
+  </section>
+
+  <section id="instalar">
+    <div class="wrap">
+      <h2>Instalar el APK</h2>
+      <p class="section-lead">Es una instalación directa, fuera de Google Play.</p>
+      <div class="steps">
+        <div class="step"><p><b>Descarga el APK</b> desde el botón de arriba o desde el enlace del encabezado, en el propio teléfono o tablet. Si tu navegador no abre la descarga, entra directamente en <a href="download/NDI-App-1.8.0.apk">download/NDI-App-1.8.0.apk</a>.</p></div>
+        <div class="step"><p><b>Permite la instalación</b> desde el navegador o el explorador de archivos cuando Android lo pida (Ajustes → Aplicaciones → Acceso especial → Instalar apps desconocidas).</p></div>
+        <div class="step"><p><b>Abre NDI App</b> y concede cámara y micrófono. El visor abre a pantalla completa; toca el menú <b>☰</b> de la cabecera para ir a Pantalla o Monitor NDI. Para la captura de pantalla, Android pedirá confirmación cada vez que la inicies.</p></div>
+        <div class="step"><p><b>Añade la fuente</b> en tu software NDI: aparecerá como <code>NDI App (modelo)</code> o <code>NDI App Pantalla (modelo)</code>.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="monitor">
+    <div class="wrap">
+      <h2>Monitor NDI integrado</h2>
+      <p class="section-lead">
+        El monitor, al que se entra desde el menú ☰, descubre las fuentes anunciadas en la red y
+        reproduce video y audio, útil para comprobar la señal antes de entrar en la mezcla. En
+        landscape se muestra el visor y la lista de fuentes en paralelo.
+      </p>
+      <div class="notice">
+        El mismo teléfono puede enviar y recibir a la vez: emite la cámara como
+        <code>NDI App (modelo)</code> y abre el monitor para ver la señal de otro equipo.
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>NDI® es una marca registrada de Vizrt NDI AB. Esta aplicación usa el SDK de NDI® y no está afiliada a Vizrt. Más información en <a href="https://ndi.video/" target="_blank" rel="noopener">ndi.video</a>.</p>
+    <p>NDI® is a registered trademark of Vizrt NDI AB. This application uses the NDI® SDK and is not affiliated with Vizrt.</p>
+  </div>
+</footer>
+
+</body>
+</html>

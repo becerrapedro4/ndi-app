@@ -1,0 +1,31 @@
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Firmas y secretos (nunca al repositorio)
+*.jks
+*.keystore
+keystore.properties
+play-service-account.json
+*.env
+
+# NDI SDK: su licencia no permite redistribuirlo. Copiar localmente
+# (ver README) antes de compilar.
+android/app/src/main/jniLibs/*/libndi.so
+android/app/src/main/cpp/ndi-sdk/
+
+# APKs generados: se publican como release, no en el historial
+dist/
+web/download/*.apk
+
+# Web
+node_modules/
+
+# Caché de Kotlin
+.kotlin/
