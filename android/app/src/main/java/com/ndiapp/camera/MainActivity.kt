@@ -2704,6 +2704,27 @@ private fun AudioTab(onMenu: () -> Unit) {
         }
     }
 
+    var pendingMode by remember { mutableIntStateOf(-1) }
+    val audioPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val target = pendingMode
+        pendingMode = -1
+        if (!granted) {
+            status = "Sin permiso de micrófono no se puede capturar audio"
+        } else if (target == 2) {
+            val intent = projectionManager?.createScreenCaptureIntent()
+            if (intent != null) {
+                projectionLauncher.launch(intent)
+            } else {
+                status = "Este dispositivo no permite capturar audio del sistema"
+            }
+        } else if (target == 0) {
+            running = source.startMicrophone("NDI App Audio (${Build.MODEL})")
+            if (!running) status = "No se pudo iniciar la fuente de audio"
+        }
+    }
+
     DisposableEffect(Unit) {
         source.onStatus = { status = it }
         onDispose { source.stop() }
@@ -2772,7 +2793,8 @@ private fun AudioTab(onMenu: () -> Unit) {
                     Text(
                         "Se envía el audio que reproducen otras apps (Android 10 o superior). " +
                             "Al iniciar, el sistema pide permiso de captura; no se comparte la " +
-                            "pantalla.",
+                            "pantalla. Hace falta también el permiso de micrófono, y las apps " +
+                            "pueden bloquear su propio audio.",
                         style = MaterialTheme.typography.bodySmall,
                         color = NdiGlass.Muted
                     )
@@ -2787,10 +2809,18 @@ private fun AudioTab(onMenu: () -> Unit) {
                             "Iniciar"
                         }
                     ) {
+                        val canRecord = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
                         when (mode) {
                             2 -> {
                                 if (systemRunning) {
                                     context.startService(SystemAudioService.stopIntent(context))
+                                } else if (!canRecord) {
+                                    pendingMode = 2
+                                    status = "Concede el micrófono para capturar audio"
+                                    audioPermission.launch(Manifest.permission.RECORD_AUDIO)
                                 } else {
                                     val intent = projectionManager?.createScreenCaptureIntent()
                                     if (intent != null) {
@@ -2806,6 +2836,10 @@ private fun AudioTab(onMenu: () -> Unit) {
                                     source.stop()
                                     running = false
                                     status = "Detenido"
+                                } else if (mode == 0 && !canRecord) {
+                                    pendingMode = 0
+                                    status = "Concede el micrófono para enviar audio"
+                                    audioPermission.launch(Manifest.permission.RECORD_AUDIO)
                                 } else {
                                     val name = "NDI App Audio (${Build.MODEL})"
                                     running = if (mode == 0) {
@@ -2850,6 +2884,7 @@ private fun MediaTab(onMenu: () -> Unit) {
     var sending by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var previewTick by remember { mutableIntStateOf(0) }
+    var rotation by remember { mutableIntStateOf(0) }
 
     fun bindPlayer() {
         player.onStatus = { status = it }
@@ -2901,6 +2936,7 @@ private fun MediaTab(onMenu: () -> Unit) {
         bindPlayer()
         val from = if (current >= 0) current else 0
         sending = player.start(playlist, "NDI App Multimedia (${Build.MODEL})", from)
+        player.setExtraRotation(rotation)
         if (!sending) status = "No se pudo iniciar la fuente NDI"
     }
 
@@ -2968,17 +3004,42 @@ private fun MediaTab(onMenu: () -> Unit) {
                     }
                 }
                 Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     GlassChip("Anterior", false, sending) { player.previous() }
-                    GlassChip(if (playing) "Pausa" else "Reproducir", playing, sending) {
-                        player.toggle()
+                    GlassChip(
+                        if (playing) "Pausa" else "Reproducir",
+                        playing,
+                        playlist.isNotEmpty()
+                    ) {
+                        if (!sending) {
+                            // Tras detener, la fuente se vuelve a crear desde el elemento actual.
+                            bindPlayer()
+                            sending = player.start(
+                                playlist,
+                                "NDI App Multimedia (${Build.MODEL})",
+                                if (current >= 0) current else 0
+                            )
+                            player.setExtraRotation(rotation)
+                            if (!sending) status = "No se pudo iniciar la fuente NDI"
+                        } else {
+                            player.toggle()
+                        }
                     }
                     GlassChip("Siguiente", false, sending) { player.next() }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     GlassChip("Bucle", loop) {
                         loop = !loop
                         player.setLooping(loop)
+                    }
+                    GlassChip("Girar $rotation°", rotation != 0) {
+                        rotation = (rotation + 90) % 360
+                        player.setExtraRotation(rotation)
                     }
                     GlassChip("Detener", false, sending) {
                         player.close()
@@ -2987,7 +3048,7 @@ private fun MediaTab(onMenu: () -> Unit) {
                         position = 0
                         duration = 0
                         preview = null
-                        status = "Detenido"
+                        status = "Detenido · pulsa Reproducir para reanudar"
                     }
                 }
             }
@@ -3038,6 +3099,20 @@ private fun MediaTab(onMenu: () -> Unit) {
                                     fillAlpha = if (index == current) 0.18f else 0.06f,
                                     elevation = 2
                                 )
+                                .clickable {
+                                    if (sending) {
+                                        player.select(index)
+                                    } else {
+                                        bindPlayer()
+                                        sending = player.start(
+                                            playlist,
+                                            "NDI App Multimedia (${Build.MODEL})",
+                                            index
+                                        )
+                                        player.setExtraRotation(rotation)
+                                    }
+                                    current = index
+                                }
                                 .padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {

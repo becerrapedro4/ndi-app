@@ -87,6 +87,8 @@ class MediaPlaylistPlayer(private val context: Context) {
     private var previewBitmap: Bitmap? = null
     private var previewAt = 0L
 
+    private var extraRotation = 0
+
     val isPlaying: Boolean
         get() = playing
 
@@ -195,6 +197,22 @@ class MediaPlaylistPlayer(private val context: Context) {
         playItem()
     }
 
+    /** Salta a un elemento concreto de la lista. */
+    fun select(position: Int) {
+        if (!running || items.isEmpty()) return
+        index = position.coerceIn(0, items.lastIndex)
+        playItem()
+    }
+
+    /** Giro manual extra en grados (0, 90, 180, 270). */
+    fun setExtraRotation(degrees: Int) {
+        extraRotation = ((degrees % 360) + 360) % 360
+        renderer?.setRotation(extraRotation)
+    }
+
+    val rotation: Int
+        get() = extraRotation
+
     fun previous() {
         if (items.isEmpty()) return
         index = (index - 1 + items.size) % items.size
@@ -258,7 +276,8 @@ class MediaPlaylistPlayer(private val context: Context) {
         }
         audio = audioStream
         val hasAudio = runCatching { audioStream.open(item.uri) }.getOrDefault(false)
-        runCatching { renderer?.setRotation(readRotation(item.uri)) }
+        // MediaPlayer ya aplica la rotación del archivo: aquí solo va el giro manual.
+        runCatching { renderer?.setRotation(extraRotation) }
         try {
             mp.setAudioAttributes(
                 AudioAttributes.Builder()

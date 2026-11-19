@@ -27,6 +27,9 @@ class AudioNdiSource(private val context: Context) {
     private var file: MediaAudioStream? = null
     private var system: SystemAudioCapture? = null
 
+    @Volatile
+    private var audioChunks = 0
+
     private val stillWidth = 1280
     private val stillHeight = 720
     private val still = ByteArray(stillWidth * stillHeight * 4).apply {
@@ -91,7 +94,9 @@ class AudioNdiSource(private val context: Context) {
         stop()
         val created = createSender(name) ?: return false
         sender = created
+        audioChunks = 0
         val capture = SystemAudioCapture(projection) { pcm, samples, channels, rate ->
+            audioChunks++
             sender?.sendAudio(pcm, samples, channels, rate)
         }
         if (!capture.start()) {
@@ -103,6 +108,13 @@ class AudioNdiSource(private val context: Context) {
         system = capture
         handler.post(pump)
         onStatus?.invoke("Enviando el audio del sistema por NDI")
+        handler.postDelayed({
+            if (system === capture && audioChunks == 0) {
+                onStatus?.invoke(
+                    "No llega audio del sistema: la app que suena puede bloquear la captura"
+                )
+            }
+        }, 4000)
         return true
     }
 
