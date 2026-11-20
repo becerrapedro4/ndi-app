@@ -37,8 +37,9 @@ export default {
     const headers = new Headers({
       "content-type": APK_TYPE,
       "content-disposition": `attachment; filename="${fileName}"`,
-      // Corto: si se publica otra versión, el nombre no queda pegado al anterior.
-      "cache-control": "public, max-age=60",
+      // Sin caché: al publicar una versión nueva ningún borde puede seguir
+      // entregando el APK anterior bajo el nombre nuevo.
+      "cache-control": "no-store",
     });
     if (release.sha256) headers.set("x-content-sha256", release.sha256);
 
