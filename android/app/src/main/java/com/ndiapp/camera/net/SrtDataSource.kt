@@ -41,7 +41,7 @@ class SrtDataSource : BaseDataSource(true) {
         while (true) {
             val read = SrtNative.read(handle, buffer, offset, length)
             if (read > 0) {
-                bytesTransferred(read.toLong())
+                bytesTransferred(read)
                 return read
             }
             if (read < 0) throw IOException("SRT: ${SrtNative.lastError()}")
