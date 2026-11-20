@@ -252,7 +252,9 @@ private class CameraUi(appContext: Context) {
     val session = CameraSession(appContext)
     val previewView = PreviewView(appContext).apply {
         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-        scaleType = PreviewView.ScaleType.FILL_CENTER
+        // FIT_CENTER: el visor enseña el cuadro completo que viaja por NDI, sin
+        // recortarlo para llenar la pantalla alta (eso cerraba el plano).
+        scaleType = PreviewView.ScaleType.FIT_CENTER
     }
 
     var running by mutableStateOf(false)

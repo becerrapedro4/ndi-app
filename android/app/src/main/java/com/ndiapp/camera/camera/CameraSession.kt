@@ -187,9 +187,12 @@ class CameraSession(private val context: Context) {
                 }
                 val fallbackSelector =
                     CameraSelector.Builder().requireLensFacing(req.lensFacing).build()
-                val target = if (req.height >= 1080) Size(1920, 1080) else Size(1280, 720)
+                // 4:3 es el modo que usa el sensor completo; con 16:9 el ISP recorta
+                // el cuadro por el lado corto y el visor sale más cerrado que la
+                // cámara del sistema, que también trabaja en 4:3.
+                val target = if (req.height >= 1080) Size(1440, 1080) else Size(960, 720)
                 val resolutionSelector = ResolutionSelector.Builder()
-                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                     .setResolutionStrategy(
                         ResolutionStrategy(
                             target,
