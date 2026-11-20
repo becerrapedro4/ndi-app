@@ -23,19 +23,10 @@ export default {
 
     const release = await currentRelease();
     const fileName = `NDI-App-${release.version}.apk`;
-    const canonical = new URL(`${DOWNLOAD_PREFIX}${fileName}`, url);
 
-    // Enlaces antiguos con el nombre de otra versión: se redirigen al actual para
-    // que sigan bajando el APK publicado y no un archivo viejo.
-    if (url.pathname !== canonical.pathname) {
-      // 307 y sin caché: un 301 permanente dejaría el navegador pegado a la
-      // versión que había cuando se compartió el enlace.
-      return new Response(null, {
-        status: 307,
-        headers: { location: canonical.toString(), "cache-control": "no-store" },
-      });
-    }
-
+    // Cualquier nombre bajo /download/ (los enlaces viejos, por ejemplo) entrega el
+    // APK publicado hoy: así compartir una URL antigua nunca baja una versión vieja
+    // ni depende de una redirección cacheada por el navegador.
     const headers = new Headers({
       "content-type": APK_TYPE,
       "content-disposition": `attachment; filename="${fileName}"`,
