@@ -3,23 +3,18 @@
 // archivo no hay que tocarlo al publicar una versión nueva.
 
 const REPO = "becerrapedro4/ndi-app";
+const LATEST_PAGE = `https://github.com/${REPO}/releases/latest`;
 const RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const DOWNLOAD_PREFIX = "/download/";
 const APK_TYPE = "application/vnd.android.package-archive";
 
-// La versión se resuelve una vez por isolate y se recuerda un minuto: consultar la
-// API en cada descarga agotaría su límite y, con caché de borde, la descarga podía
-// anunciar el nombre de la versión anterior justo después de publicar.
+// La versión se recuerda un minuto por isolate. Se resuelve leyendo la redirección
+// de /releases/latest, que no tiene límite de peticiones: la API de GitHub comparte
+// la cuota por IP y desde la red del Worker se agota, y aquel respaldo fijo era la
+// causa de que algunas descargas entregaran el APK de una versión vieja.
 const RELEASE_TTL_MS = 60_000;
 let cachedRelease = null;
 let cachedAt = 0;
-
-// Respaldo si la API no responde (límite de peticiones, red caída): la última
-// versión publicada y el hash de su APK.
-const FALLBACK = {
-  version: "1.9.6",
-  sha256: "6db62ab6c3ce1a8bf47df54f68b4b289f6307dbc7592625a9c57061721c9e70b",
-};
 
 export default {
   async fetch(request, env) {
@@ -29,6 +24,12 @@ export default {
     }
 
     const release = await currentRelease();
+    if (!release) {
+      return new Response("No se pudo resolver la versión publicada.\n", {
+        status: 502,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
     const fileName = `NDI-App-${release.version}.apk`;
 
     // Cualquier nombre bajo /download/ (incluidos los enlaces viejos) entrega el
@@ -64,6 +65,36 @@ async function currentRelease() {
   const now = Date.now();
   if (cachedRelease && now - cachedAt < RELEASE_TTL_MS) return cachedRelease;
 
+  let version = await latestTag();
+  let sha256 = null;
+  if (!version) {
+    const api = await apiRelease();
+    version = api?.version ?? cachedRelease?.version ?? null;
+    sha256 = api?.sha256 ?? null;
+  }
+  if (!version) return cachedRelease ?? null;
+  if (!sha256) sha256 = await apiDigest(version);
+
+  cachedRelease = { version, sha256 };
+  cachedAt = now;
+  return cachedRelease;
+}
+
+/** Versión del último release sin gastar cuota: el tag va en la redirección. */
+async function latestTag() {
+  try {
+    const response = await fetch(LATEST_PAGE, { method: "HEAD", redirect: "manual" });
+    const location = response.headers.get("location") ?? "";
+    const match = location.match(/\/releases\/tag\/v?([^/?#]+)/);
+    if (match) return decodeURIComponent(match[1]).trim() || null;
+  } catch {
+    // Sin redirección se prueba la API.
+  }
+  return null;
+}
+
+/** Respaldo con la API (puede estar limitada): versión y hash del APK. */
+async function apiRelease() {
   try {
     const response = await fetch(RELEASE_API, {
       headers: {
@@ -72,21 +103,32 @@ async function currentRelease() {
         "cache-control": "no-cache",
       },
     });
-    if (!response.ok) return cachedRelease ?? FALLBACK;
-
+    if (!response.ok) return null;
     const data = await response.json();
     const version = String(data.tag_name ?? "").replace(/^v/, "").trim();
-    if (!version) return cachedRelease ?? FALLBACK;
-
-    const asset = (data.assets ?? []).find((item) => item?.name === `NDI-App-${version}.apk`);
-    const digest = typeof asset?.digest === "string" ? asset.digest.replace(/^sha256:/i, "") : "";
-    // Sin digest de GitHub solo se puede afirmar el hash de la versión de respaldo.
-    const sha256 = digest || (version === FALLBACK.version ? FALLBACK.sha256 : null);
-
-    cachedRelease = { version, sha256 };
-    cachedAt = now;
-    return cachedRelease;
+    if (!version) return null;
+    return { version, sha256: digestOf(data, version) };
   } catch {
-    return cachedRelease ?? FALLBACK;
+    return null;
   }
+}
+
+/** Hash del APK, sólo informativo: si la API no responde se omite la cabecera. */
+async function apiDigest(version) {
+  try {
+    const response = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/v${version}`, {
+      headers: { accept: "application/vnd.github+json", "user-agent": "ndi-app-site" },
+    });
+    if (!response.ok) return null;
+    return digestOf(await response.json(), version);
+  } catch {
+    return null;
+  }
+}
+
+function digestOf(data, version) {
+  const asset = (data.assets ?? []).find((item) => item?.name === `NDI-App-${version}.apk`);
+  if (typeof asset?.digest !== "string") return null;
+  const digest = asset.digest.replace(/^sha256:/i, "").trim();
+  return digest || null;
 }
