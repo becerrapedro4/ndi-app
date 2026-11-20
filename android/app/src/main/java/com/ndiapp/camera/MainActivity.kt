@@ -119,6 +119,11 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -2592,7 +2597,16 @@ private fun MonitorTab(onMenu: () -> Unit) {
         mutableStateOf(prefs.getStringSet("ips", emptySet())?.sorted().orEmpty())
     }
     var newIp by remember { mutableStateOf("") }
+    // Recepción RTSP: URL pegada por el usuario y reproductor en curso.
+    var rtspUrl by rememberSaveable {
+        mutableStateOf(prefs.getString("rtsp", "").orEmpty())
+    }
+    var player by remember { mutableStateOf<ExoPlayer?>(null) }
+    var rtspError by remember { mutableStateOf<String?>(null) }
     val openSource: (NdiSource) -> Unit = { chosen ->
+        player?.release()
+        player = null
+        rtspError = null
         playing = chosen
         receiver.start(
             scope = scope,
@@ -2605,6 +2619,34 @@ private fun MonitorTab(onMenu: () -> Unit) {
             },
             onStats = { values -> stats = values }
         )
+    }
+
+    /** Reproduce una URL rtsp:// con el reproductor del sistema multimedia. */
+    val playRtsp: (String) -> Unit = { raw ->
+        val address = raw.trim()
+        if (address.isNotEmpty()) {
+            player?.release()
+            rtspError = null
+            playing = null
+            frame = null
+            receiver.stop()
+            val built = ExoPlayer.Builder(context).build()
+            built.setMediaItem(MediaItem.fromUri(address))
+            built.playWhenReady = true
+            built.addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    rtspError = error.errorCodeName
+                }
+            })
+            built.prepare()
+            player = built
+            prefs.edit().putString("rtsp", address).apply()
+        }
+    }
+    val stopRtsp: () -> Unit = {
+        player?.release()
+        player = null
+        rtspError = null
     }
 
     // Pantalla completa y vista limpia ocultan cabecera, lista y barras del sistema.
@@ -2642,6 +2684,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
     DisposableEffect(Unit) {
         onDispose {
             receiver.stop()
+            player?.release()
             finder.close()
         }
     }
@@ -2679,7 +2722,19 @@ private fun MonitorTab(onMenu: () -> Unit) {
                 ) {
                     val current = frame
                     val tick = frameSeq
-                    if (current != null) {
+                    val rtspPlayer = player
+                    if (rtspPlayer != null) {
+                        AndroidView(
+                            factory = { ctx ->
+                                PlayerView(ctx).apply {
+                                    useController = false
+                                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                                }
+                            },
+                            update = { view -> view.player = rtspPlayer },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else if (current != null) {
                         AndroidView(
                             factory = { ctx -> NdiVideoView(ctx) },
                             update = { view -> if (tick >= 0) view.setFrame(current) },
@@ -2698,8 +2753,9 @@ private fun MonitorTab(onMenu: () -> Unit) {
                         ) {
                             GlassChip("Menú", false) { onMenu() }
                             StatusPill(
-                                running = playing != null,
-                                text = playing?.name ?: "Monitor NDI"
+                                running = playing != null || player != null,
+                                text = playing?.name
+                                    ?: if (player != null) "RTSP" else "Monitor NDI"
                             )
                         }
                         Row(
@@ -2709,7 +2765,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (playing != null) {
+                            if (playing != null || player != null) {
                                 GlassChip("PiP", pipActive.value) { enterPip(activity) }
                                 GlassChip("Vista limpia", false) { clean = true }
                                 GlassChip(
@@ -2759,6 +2815,60 @@ private fun MonitorTab(onMenu: () -> Unit) {
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
+                    GlassPanel {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "RTSP",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = NdiGlass.Text,
+                                modifier = Modifier.weight(1f)
+                            )
+                            GlassChip(if (player != null) "Parar" else "Ver", player != null) {
+                                if (player != null) stopRtsp() else playRtsp(rtspUrl)
+                            }
+                        }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 10.dp)
+                                .glassSurface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    fillAlpha = 0.08f,
+                                    elevation = 3
+                                )
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(Modifier.weight(1f)) {
+                                if (rtspUrl.isEmpty()) {
+                                    Text(
+                                        "rtsp://usuario:clave@host:554/stream",
+                                        color = NdiGlass.Muted,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                                androidx.compose.foundation.text.BasicTextField(
+                                    value = rtspUrl,
+                                    onValueChange = { rtspUrl = it },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                        color = NdiGlass.Text,
+                                        fontSize = 13.sp
+                                    ),
+                                    cursorBrush = androidx.compose.ui.graphics.SolidColor(
+                                        NdiGlass.BlueBright
+                                    )
+                                )
+                            }
+                        }
+                        Text(
+                            rtspError?.let { "RTSP: $it" }
+                                ?: "Pegá una URL rtsp:// y tocá Ver.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NdiGlass.Muted
+                        )
+                    }
+
                     GlassPanel {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(

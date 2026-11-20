@@ -17,8 +17,8 @@ android {
         applicationId = "com.ndiapp.camera"
         minSdk = 26
         targetSdk = 34
-        versionCode = 31
-        versionName = "1.10.4"
+        versionCode = 32
+        versionName = "1.11.0"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
@@ -87,4 +87,8 @@ dependencies {
     implementation("androidx.camera:camera-view:1.3.4")
     implementation("androidx.camera:camera-video:1.3.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // Recepción RTSP en el monitor: demux RTP y decodificado con MediaCodec.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
 }
