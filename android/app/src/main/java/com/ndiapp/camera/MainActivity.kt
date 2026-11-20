@@ -74,6 +74,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
@@ -270,6 +271,7 @@ private class CameraUi(appContext: Context) {
     var recordNotice by mutableStateOf<String?>(null)
     var connections by mutableIntStateOf(0)
     var zoom by mutableFloatStateOf(1f)
+    var minZoom by mutableFloatStateOf(1f)
     var maxZoom by mutableFloatStateOf(1f)
     var exposure by mutableIntStateOf(0)
     var exposureRange by mutableStateOf(0..0)
@@ -305,9 +307,10 @@ private class CameraUi(appContext: Context) {
 }
 
 private fun CameraUi.refreshLens() {
-    maxZoom = session.maxZoom.coerceAtLeast(1f)
+    minZoom = session.minZoom.coerceIn(0.1f, 1f)
+    maxZoom = session.maxZoom.coerceAtLeast(minZoom)
     exposureRange = session.exposureRange
-    zoom = 1f
+    zoom = 1f.coerceIn(minZoom, maxZoom)
     isoRange = session.isoRange
     exposureStep = session.exposureStep
     minFocusDistance = session.minFocusDistance
@@ -331,7 +334,11 @@ private fun CameraUi.refreshLens() {
     autoShutterDen = shutterDen
     autoIso = isoValues().getOrElse(isoIndex) { 400 }
     lenses = session.rearLenses
-    lensIndex = lensIndex.coerceIn(0, (lenses.size - 1).coerceAtLeast(0))
+    // La primera apertura usa la cámara trasera por defecto: el índice se ajusta
+    // a la que el sensor tiene abierta de verdad, no a la primera de la lista.
+    val active = lenses.indexOfFirst { it.id == session.cameraId }
+    lensIndex = if (active >= 0) active
+    else lensIndex.coerceIn(0, (lenses.size - 1).coerceAtLeast(0))
     session.setMuted(muted)
     applyPro()
 }
@@ -628,11 +635,43 @@ private fun CameraUi.toggleRecording() {
     }
 }
 
+/** Abre una lente trasera concreta (gran angular, principal, tele). */
+private fun CameraUi.selectLens(index: Int, lifecycleOwner: LifecycleOwner) {
+    if (facing != CameraSelector.LENS_FACING_BACK) return
+    if (index !in lenses.indices || index == lensIndex) return
+    lensIndex = index
+    restart(lifecycleOwner)
+}
+
 /** Rota entre las lentes traseras (ultra gran angular, principal, tele). */
 private fun CameraUi.cycleLens(lifecycleOwner: LifecycleOwner) {
     if (facing != CameraSelector.LENS_FACING_BACK || lenses.size < 2) return
-    lensIndex = (lensIndex + 1) % lenses.size
-    restart(lifecycleOwner)
+    selectLens((lensIndex + 1) % lenses.size, lifecycleOwner)
+}
+
+/** Fija el aumento sobre la lente abierta (0,5× … máximo del sensor). */
+private fun CameraUi.setZoomTo(ratio: Float) {
+    zoom = ratio.coerceIn(minZoom, maxZoom)
+    session.setZoom(zoom)
+}
+
+/**
+ * Saltos de aumento del visor. Incluye el mínimo real del sensor, que en los
+ * teléfonos con cámara lógica es el ultra gran angular (0,5×/0,6×).
+ */
+private fun CameraUi.zoomPresets(): List<Float> {
+    if (facing != CameraSelector.LENS_FACING_BACK) return emptyList()
+    val options = mutableListOf<Float>()
+    if (minZoom < 0.95f) options += minZoom
+    options += 1f
+    listOf(2f, 3f, 5f).filter { it <= maxZoom + 0.02f }.forEach { options += it }
+    return options.distinct().sorted()
+}
+
+/** Rótulo de aumento con coma decimal: «0,6×», «1×», «2,5×». */
+private fun zoomLabel(ratio: Float): String {
+    val tenths = (ratio * 10f).roundToInt()
+    return if (tenths % 10 == 0) "${tenths / 10}×" else "${tenths / 10},${tenths % 10}×"
 }
 
 private fun CameraUi.stopPreview() {
@@ -800,7 +839,7 @@ private fun CameraScreen(
                     detectTransformGestures(panZoomLock = true) { _, _, zoomChange, _ ->
                         if (zoomChange == 1f) return@detectTransformGestures
                         val next = (camera.zoom * zoomChange)
-                            .coerceIn(1f, camera.maxZoom.coerceAtLeast(1f))
+                            .coerceIn(camera.minZoom, camera.maxZoom)
                         camera.zoom = next
                         camera.session.setZoom(next)
                     }
@@ -855,6 +894,11 @@ private fun CameraScreen(
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
                 }
+                ZoomBar(
+                    camera = camera,
+                    lifecycleOwner = lifecycleOwner,
+                    modifier = Modifier.padding(bottom = 5.dp)
+                )
                 if (camera.proOpen) {
                     ProStrip(
                         camera = camera,
@@ -1076,6 +1120,115 @@ private fun MenuButton(onClick: () -> Unit) {
                 drawLine(lineColor, Offset(0f, y), Offset(size.width, y), strokeWidth = stroke.width, cap = StrokeCap.Round)
             }
         }
+    }
+}
+
+/**
+ * Barra de zoom del visor: las lentes del equipo si las expone por separado y,
+ * si no, los saltos de aumento del sensor. El pellizco sigue funcionando.
+ */
+@Composable
+private fun ZoomBar(
+    camera: CameraUi,
+    lifecycleOwner: LifecycleOwner,
+    modifier: Modifier = Modifier
+) {
+    if (camera.facing != CameraSelector.LENS_FACING_BACK) return
+    val lenses = camera.lenses
+    val presets = camera.zoomPresets()
+    val lensMode = lenses.size > 1
+    if (!lensMode && presets.size < 2 && abs(camera.maxZoom - camera.minZoom) < 0.05f) return
+    Column(
+        modifier
+            .widthIn(max = 560.dp)
+            .fillMaxWidth()
+            .glassSurface(
+                shape = RoundedCornerShape(18.dp),
+                tint = Color.Black,
+                fillAlpha = 0.62f,
+                strokeAlpha = 0.32f,
+                elevation = 16
+            )
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("ZOOM", fontSize = 8.sp, color = NdiGlass.Muted)
+            Spacer(Modifier.width(7.dp))
+            Row(
+                Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (lensMode) {
+                    lenses.forEachIndexed { index, lens ->
+                        ZoomChip(lens.label, camera.lensIndex == index) {
+                            camera.selectLens(index, lifecycleOwner)
+                        }
+                    }
+                } else {
+                    presets.forEach { preset ->
+                        ZoomChip(zoomLabel(preset), abs(camera.zoom - preset) < 0.06f) {
+                            camera.setZoomTo(preset)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.width(6.dp))
+            Text(
+                zoomLabel(camera.zoom),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = NdiGlass.BlueBright
+            )
+        }
+        // Regla continua, como el dial de la cámara del sistema: permite
+        // cualquier aumento entre el mínimo (gran angular) y el máximo.
+        if (camera.maxZoom - camera.minZoom >= 0.05f) {
+            Slider(
+                value = camera.zoom.coerceIn(camera.minZoom, camera.maxZoom),
+                onValueChange = { camera.setZoomTo(it) },
+                valueRange = camera.minZoom..camera.maxZoom,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = NdiGlass.BlueBright,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 2.dp)
+            )
+        }
+    }
+}
+
+/** Pastilla de una lente o de un aumento del visor. */
+@Composable
+private fun ZoomChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(CircleShape)
+            .background(
+                if (selected) NdiGlass.BlueBright.copy(alpha = 0.20f)
+                else Color.White.copy(alpha = 0.10f)
+            )
+            .border(
+                1.dp,
+                if (selected) NdiGlass.BlueBright.copy(alpha = 0.85f)
+                else Color.White.copy(alpha = 0.22f),
+                CircleShape
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 9.dp, vertical = 3.dp)
+    ) {
+        Text(
+            label,
+            fontSize = 10.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = if (selected) NdiGlass.BlueBright else Color.White.copy(alpha = 0.85f),
+            maxLines = 1
+        )
     }
 }
 

@@ -92,7 +92,14 @@ class CameraSession(private val context: Context) {
     /** La cámara ya está abierta y sus rangos reales (ISO, EV, obturación) leídos. */
     var onCameraReady: (() -> Unit)? = null
 
+    var minZoom: Float = 1f
+        private set
+
     var maxZoom: Float = 1f
+        private set
+
+    /** Cámara que está abierta ahora mismo (su id de Camera2). */
+    var cameraId: String? = null
         private set
 
     var exposureRange: IntRange = 0..0
@@ -267,7 +274,12 @@ class CameraSession(private val context: Context) {
                         exposureTimeRange = it.lower..it.upper
                     }
                 }
-                maxZoom = bound.first.cameraInfo.zoomState.value?.maxZoomRatio?.coerceAtLeast(1f) ?: 1f
+                cameraId = runCatching {
+                    Camera2CameraInfo.from(bound.first.cameraInfo).cameraId
+                }.getOrNull()
+                val zoomState = bound.first.cameraInfo.zoomState.value
+                minZoom = zoomState?.minZoomRatio?.coerceAtLeast(0.1f) ?: 1f
+                maxZoom = zoomState?.maxZoomRatio?.coerceAtLeast(minZoom) ?: 1f
                 val state = bound.first.cameraInfo.exposureState
                 exposureRange = state.exposureCompensationRange.lower..
                     state.exposureCompensationRange.upper
@@ -338,7 +350,9 @@ class CameraSession(private val context: Context) {
                 String.format(Locale.US, "%.1f×", safe)
             }
             lens.copy(label = label)
-        }
+        // Un mismo objetivo puede aparecer dos veces (cámara lógica y física):
+        // se deja una entrada por campo de visión.
+        }.distinctBy { it.label }
     }
 
     /** Crea la fuente NDI y empieza a enviar los frames de la vista previa. */
@@ -384,6 +398,9 @@ class CameraSession(private val context: Context) {
         runCatching { provider?.unbindAll() }
         provider = null
         camera = null
+        cameraId = null
+        minZoom = 1f
+        maxZoom = 1f
         camera2Control = null
         videoCapture = null
         hasFlash = false
@@ -398,7 +415,7 @@ class CameraSession(private val context: Context) {
     fun connections(): Int = sender?.connections() ?: 0
 
     fun setZoom(ratio: Float) {
-        camera?.cameraControl?.setZoomRatio(ratio.coerceIn(1f, maxZoom))
+        camera?.cameraControl?.setZoomRatio(ratio.coerceIn(minZoom, maxZoom))
     }
 
     fun setExposure(index: Int) {

@@ -4,6 +4,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Con -PprebuiltNdi=true se reutilizan las librerías nativas ya compiladas de
+// app/src/main/jniLibs y no se llama a CMake, que necesita el SDK de NDI para
+// Android (propietario y no versionado) sólo para compilar el puente JNI.
+val prebuiltNdi = providers.gradleProperty("prebuiltNdi").orNull == "true"
+
 android {
     namespace = "com.ndiapp.camera"
     compileSdk = 34
@@ -12,22 +17,26 @@ android {
         applicationId = "com.ndiapp.camera"
         minSdk = 26
         targetSdk = 34
-        versionCode = 22
-        versionName = "1.9.2"
+        versionCode = 23
+        versionName = "1.9.3"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
-        externalNativeBuild {
-            cmake {
-                cppFlags += listOf("-std=c++17", "-Wno-deprecated-declarations")
+        if (!prebuiltNdi) {
+            externalNativeBuild {
+                cmake {
+                    cppFlags += listOf("-std=c++17", "-Wno-deprecated-declarations")
+                }
             }
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+    if (!prebuiltNdi) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
     }
 
