@@ -26,6 +26,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
 import java.io.File
+import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -78,8 +79,8 @@ class Camera2LensSource(private val context: Context) {
     val isRecording: Boolean
         get() = recorder != null
 
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val callbackExecutor = Executor { command -> mainHandler.post(command) }
     private val frameThread = HandlerThread("camera2-lens").apply { start() }
     private val frameHandler = Handler(frameThread.looper)
 
@@ -122,6 +123,10 @@ class Camera2LensSource(private val context: Context) {
 
         override fun surfaceDestroyed(holder: SurfaceHolder) {
             previewSurface = null
+            val configured = session
+            session = null
+            runCatching { configured?.stopRepeating() }
+            runCatching { configured?.close() }
         }
     }
 
@@ -160,7 +165,7 @@ class Camera2LensSource(private val context: Context) {
         previewSize = chooseSize(map?.getOutputSizes(SurfaceHolder::class.java), height, fullSensor)
             ?: pendingAnalysisSize
 
-        runCatching { manager.openCamera(logicalId, ioExecutor, deviceCallback) }
+        runCatching { manager.openCamera(logicalId, deviceCallback, mainHandler) }
             .onFailure {
                 Log.e(TAG, "No se pudo abrir $logicalId", it)
                 onError?.invoke("No se pudo abrir la cámara: ${it.message}")
@@ -201,6 +206,7 @@ class Camera2LensSource(private val context: Context) {
             )
             reader = created
             created.setOnImageAvailableListener({ source ->
+                if (closed) return@setOnImageAvailableListener
                 val image = runCatching { source.acquireLatestImage() }.getOrNull()
                     ?: return@setOnImageAvailableListener
                 try {
@@ -235,7 +241,7 @@ class Camera2LensSource(private val context: Context) {
                 SessionConfiguration(
                     SessionConfiguration.SESSION_REGULAR,
                     outputs,
-                    ioExecutor,
+                    callbackExecutor,
                     object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(configured: CameraCaptureSession) {
                             if (closed) {
@@ -499,9 +505,13 @@ class Camera2LensSource(private val context: Context) {
 
     fun close() {
         closed = true
+        runCatching { session?.stopRepeating() }
         runCatching { session?.close() }
         runCatching { device?.close() }
-        runCatching { reader?.close() }
+        val toClose = reader
+        reader = null
+        toClose?.setOnImageAvailableListener(null, null)
+        toClose?.let { r -> frameHandler.post { runCatching { r.close() } } }
         previewView?.holder?.removeCallback(holderCallback)
         session = null
         device = null
@@ -514,7 +524,8 @@ class Camera2LensSource(private val context: Context) {
             runCatching { active.release() }
         }
         recorder = null
-        ioExecutor.shutdown()
+        // Sólo se apaga el hilo de los cuadros; las devoluciones de la cámara van
+        // al hilo principal y sobreviven al cierre de la sesión.
         runCatching { frameThread.quitSafely() }
     }
 

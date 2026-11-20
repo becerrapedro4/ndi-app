@@ -147,9 +147,11 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Cualquier fallo queda anotado y se muestra al abrir la app otra vez.
+        CrashLog.install(this)
+        lastCrashText = CrashLog.take(this)?.let { CrashLog.summary(it) }
         enableMulticast()
         setContent {
             NdiAppTheme {
@@ -248,6 +250,9 @@ private fun AppRoot() {
 
 // ------------------------------------------------------ estado de la cámara --
 
+/** Último fallo no controlado, para mostrarlo en el estado de la cámara. */
+private var lastCrashText: String? = null
+
 /** Estado compartido entre el visor y la pantalla de ajustes. */
 private class CameraUi(appContext: Context) {
     val session = CameraSession(appContext)
@@ -270,6 +275,10 @@ private class CameraUi(appContext: Context) {
     // Lente física oculta abierta con Camera2: su vista va en un SurfaceView propio.
     var camera2Active by mutableStateOf(false)
     var status by mutableStateOf("Vista previa")
+
+    init {
+        lastCrashText?.let { status = "Último fallo: $it" }
+    }
     var facing by mutableIntStateOf(CameraSelector.LENS_FACING_BACK)
     var height by mutableIntStateOf(1080)
     var fps by mutableIntStateOf(30)
@@ -824,9 +833,21 @@ private fun CameraScreen(
     ) {
         val landscape = maxWidth > maxHeight
 
-        AndroidView(factory = { camera.previewView }, modifier = Modifier.fillMaxSize())
-        // El visor lo dibuja el pipeline Camera2 en su propia superficie.
-        AndroidView(factory = { camera.surfaceView }, modifier = Modifier.fillMaxSize())
+        // El visor dibuja el cuadro que viaja por NDI con su relación real: ocupa
+        // el ancho de la pantalla sin estirarlo.
+        val previewAspect = when {
+            landscape && camera.fullSensor -> 4f / 3f
+            landscape -> 16f / 9f
+            camera.fullSensor -> 3f / 4f
+            else -> 9f / 16f
+        }
+        AndroidView(
+            factory = { camera.surfaceView },
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(previewAspect)
+                .align(Alignment.Center)
+        )
         if (camera.grid) FramingGrid()
 
         // Al emitir queda una línea roja fija en el borde superior y, si otro
