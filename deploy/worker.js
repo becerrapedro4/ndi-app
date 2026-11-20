@@ -28,7 +28,12 @@ export default {
     // Enlaces antiguos con el nombre de otra versión: se redirigen al actual para
     // que sigan bajando el APK publicado y no un archivo viejo.
     if (url.pathname !== canonical.pathname) {
-      return Response.redirect(canonical.toString(), 301);
+      // 307 y sin caché: un 301 permanente dejaría el navegador pegado a la
+      // versión que había cuando se compartió el enlace.
+      return new Response(null, {
+        status: 307,
+        headers: { location: canonical.toString(), "cache-control": "no-store" },
+      });
     }
 
     const headers = new Headers({
@@ -62,7 +67,7 @@ async function currentRelease() {
         accept: "application/vnd.github+json",
         "user-agent": "ndi-app-site",
       },
-      cf: { cacheTtl: 600, cacheEverything: true },
+      cf: { cacheTtl: 120, cacheEverything: true },
     });
     if (!response.ok) return FALLBACK;
 
