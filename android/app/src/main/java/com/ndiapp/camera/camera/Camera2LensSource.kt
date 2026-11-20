@@ -12,6 +12,7 @@ import android.hardware.camera2.params.SessionConfiguration
 import android.media.ImageReader
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.util.Range
@@ -63,6 +64,8 @@ class Camera2LensSource(private val context: Context) {
 
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val frameThread = HandlerThread("camera2-lens").apply { start() }
+    private val frameHandler = Handler(frameThread.looper)
 
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
@@ -145,7 +148,7 @@ class Camera2LensSource(private val context: Context) {
             )
         }
 
-        manager.openCamera(logicalId, deviceCallback, ioExecutor)
+        manager.openCamera(logicalId, ioExecutor, deviceCallback)
     }
 
     private val deviceCallback = object : CameraDevice.StateCallback() {
@@ -189,15 +192,15 @@ class Camera2LensSource(private val context: Context) {
             } finally {
                 image.close()
             }
-        }, ioExecutor)
+        }, frameHandler)
 
         val outputs = mutableListOf<OutputConfiguration>()
         val previewConfig = OutputConfiguration(surface)
         val analysisConfig = OutputConfiguration(analysis.surface)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && physicalId != null) {
             runCatching {
-                previewConfig.physicalCameraId = physicalId
-                analysisConfig.physicalCameraId = physicalId
+                previewConfig.setPhysicalCameraId(physicalId)
+                analysisConfig.setPhysicalCameraId(physicalId)
             }.onFailure { Log.w(TAG, "Salida física no admitida: ${it.message}") }
         }
         outputs += previewConfig
@@ -345,6 +348,7 @@ class Camera2LensSource(private val context: Context) {
         previewView = null
         previewSurface = null
         ioExecutor.shutdown()
+        runCatching { frameThread.quitSafely() }
     }
 
     // ----------------------------------------------------------------- utils --
