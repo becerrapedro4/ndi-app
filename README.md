@@ -38,21 +38,6 @@ El APK queda en `android/app/build/outputs/apk/release/app-release.apk`.
 La versión publicada se firma con una clave de depuración; para publicar en Google Play hay que
 crear un keystore de release y configurar la firma (ver más abajo).
 
-## Publicar en Google Play
-
-1. Crear un keystore propio y **no** versionarlo:
-
-   ```bash
-   keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 4096 \
-           -validity 10000 -alias ndi-app
-   ```
-
-2. Configurar la firma en `android/app/build.gradle.kts` leyendo las credenciales de
-   `keystore.properties` (ese archivo está en `.gitignore`).
-3. Generar el AAB con `./gradlew bundleRelease` y subirlo a Play Console.
-4. Completar ficha, política de privacidad, seguridad de datos, clasificación de contenido y las
-   declaraciones de permisos sensibles (captura de pantalla, audio y superposición).
-
 ## Licencia
 
 Código propio bajo licencia MIT (ver [LICENSE](LICENSE)). Las dependencias mantienen sus licencias:
