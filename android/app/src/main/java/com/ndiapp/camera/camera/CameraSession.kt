@@ -178,6 +178,9 @@ class CameraSession(private val context: Context) {
     private var rgbaBuffer = ByteArray(0)
     private var previewBitmap: Bitmap? = null
     private var previewBuffer: ByteBuffer? = null
+
+    @Volatile
+    private var previewPending = false
     private var previewView: PreviewView? = null
     private var camera2Control: Camera2CameraControl? = null
 
@@ -520,7 +523,13 @@ class CameraSession(private val context: Context) {
         buffer.put(rgbaBuffer, 0, bytes)
         buffer.rewind()
         bitmap.copyPixelsFromBuffer(buffer)
-        callback(bitmap)
+        // Sin acumular avisos: si el hilo principal va lento, se salta cuadros.
+        if (previewPending) return
+        previewPending = true
+        mainHandler.post {
+            previewPending = false
+            onPreviewFrame?.invoke(bitmap)
+        }
     }
 
     /** Crea la fuente NDI y empieza a enviar los frames de la vista previa. */

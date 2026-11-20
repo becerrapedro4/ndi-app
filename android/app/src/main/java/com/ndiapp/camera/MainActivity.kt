@@ -300,6 +300,9 @@ private class CameraUi(appContext: Context) {
     /** Superficie del pipeline Camera2 (lentes físicas que CameraX no expone). */
     val surfaceView = SurfaceView(appContext)
 
+    /** Visor propio: dibuja los cuadros de la cámara sin recomponer la pantalla. */
+    val cameraView = CameraPreviewView(appContext)
+
     init {
         session.setSurfaceView(surfaceView)
     }
@@ -331,8 +334,6 @@ private class CameraUi(appContext: Context) {
     var connections by mutableIntStateOf(0)
     // Relación real del cuadro que entrega la lente (alto / ancho en vertical).
     var previewAspect by mutableFloatStateOf(0f)
-    // Último cuadro de la cámara, ya rotado: lo dibuja el visor propio.
-    var previewFrame by mutableStateOf<Bitmap?>(null)
     var zoom by mutableFloatStateOf(1f)
     var minZoom by mutableFloatStateOf(1f)
     var maxZoom by mutableFloatStateOf(1f)
@@ -669,7 +670,7 @@ private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
     session.onCameraReady = {
         Handler(Looper.getMainLooper()).post { refreshLens() }
     }
-    session.onPreviewFrame = { bitmap -> previewFrame = bitmap }
+    session.onPreviewFrame = { bitmap -> cameraView.setFrame(bitmap) }
     session.start(previewView, lifecycleOwner, cameraRequest())
     previewing = true
     status = "Vista previa"
@@ -876,8 +877,7 @@ private fun CameraScreen(
         // El visor dibuja los mismos cuadros que van a NDI con su proporción:
         // franjas negras si sobra espacio, nunca deformación.
         AndroidView(
-            factory = { ctx -> CameraPreviewView(ctx) },
-            update = { view -> camera.previewFrame?.let { frame -> view.setFrame(frame) } },
+            factory = { camera.cameraView },
             modifier = Modifier.fillMaxSize()
         )
         if (camera.grid) FramingGrid()
