@@ -825,10 +825,8 @@ private fun CameraScreen(
         val landscape = maxWidth > maxHeight
 
         AndroidView(factory = { camera.previewView }, modifier = Modifier.fillMaxSize())
-        // La lente oculta se dibuja con Camera2 en su propia superficie.
-        if (camera.camera2Active) {
-            AndroidView(factory = { camera.surfaceView }, modifier = Modifier.fillMaxSize())
-        }
+        // El visor lo dibuja el pipeline Camera2 en su propia superficie.
+        AndroidView(factory = { camera.surfaceView }, modifier = Modifier.fillMaxSize())
         if (camera.grid) FramingGrid()
 
         // Al emitir queda una línea roja fija en el borde superior y, si otro
@@ -858,7 +856,10 @@ private fun CameraScreen(
                     detectTapGestures(
                         onTap = { point ->
                             focusRing = point
-                            camera.session.focusAt(point.x, point.y)
+                            camera.session.focusAt(
+                                point.x / size.width.coerceAtLeast(1),
+                                point.y / size.height.coerceAtLeast(1)
+                            )
                         },
                         onDoubleTap = { chrome = !chrome }
                     )

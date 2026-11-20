@@ -142,13 +142,14 @@ class CameraSession(private val context: Context) {
 
     /** La cámara abierta va por el pipeline Camera2 propio (lente oculta). */
     val isCamera2Source: Boolean
-        get() = hiddenSource != null
+        get() = camera2Source != null
 
+    /** Con Camera2 la grabación local la hace el MediaRecorder de la sesión. */
     val canRecord: Boolean
-        get() = videoCapture != null
+        get() = camera2Source != null || videoCapture != null
 
     val isRecording: Boolean
-        get() = recording != null
+        get() = camera2Source?.isRecording == true || recording != null
 
     val isStreaming: Boolean
         get() = sender != null
@@ -166,7 +167,7 @@ class CameraSession(private val context: Context) {
     private var previewView: PreviewView? = null
     private var camera2Control: Camera2CameraControl? = null
 
-    private var hiddenSource: Camera2LensSource? = null
+    private var camera2Source: Camera2LensSource? = null
     private var surfaceView: SurfaceView? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
@@ -202,13 +203,11 @@ class CameraSession(private val context: Context) {
                 } else {
                     CameraSelector.Builder().requireLensFacing(req.lensFacing).build()
                 }
-                // Lente física que el sistema no deja abrir por su cuenta: se
-                // resuelve con el pipeline Camera2, no con CameraX.
-                rearLenses.firstOrNull { it.id == req.cameraId && it.physical != null }
-                    ?.let { hidden ->
-                        openHiddenLens(hidden)
-                        return@addListener
-                    }
+                // Toda la sección de cámara va por el pipeline Camera2, igual que
+                // PhotonCamera: una sola sesión con vista previa, análisis y grabación
+                // propias, y los controles pro pedidos sobre esa sesión.
+                val lens = lensFor(req)
+                if (lens != null && openCamera2Lens(lens)) return@addListener
                 val fallbackSelector =
                     CameraSelector.Builder().requireLensFacing(req.lensFacing).build()
                 // 4:3 usa el sensor completo (igual que la cámara del sistema); 16:9
@@ -407,34 +406,45 @@ class CameraSession(private val context: Context) {
         return (visible + extra).sortedBy { it.equivMm }
     }
 
-    /**
-     * Abre una lente física oculta con Camera2: la cámara lógica con las salidas
-     * enlazadas a la cámara física. Los frames van a la fuente NDI igual que en
-     * CameraX.
-     */
-    private fun openHiddenLens(lens: CameraLens) {
-        val req = request ?: return
-        val key = lens.physical ?: return
-        val view = surfaceView
-        if (view == null) {
-            onStatus?.invoke("Falta la superficie de la lente")
-            return
+    /** Lente que corresponde a la petición: trasera elegida o la delantera. */
+    private fun lensFor(req: CameraRequest): CameraLens? {
+        if (req.lensFacing != CameraSelector.LENS_FACING_BACK) {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val id = runCatching {
+                manager.cameraIdList.firstOrNull { candidate ->
+                    manager.getCameraCharacteristics(candidate)
+                        .get(CameraCharacteristics.LENS_FACING) ==
+                        CameraCharacteristics.LENS_FACING_FRONT
+                }
+            }.getOrNull() ?: return null
+            return CameraLens(id = id, label = "Delantera", focalMm = 0f, equivMm = 26f)
         }
+        val lenses = rearLenses
+        if (lenses.isEmpty()) return null
+        val chosen = req.cameraId?.let { wanted -> lenses.firstOrNull { it.id == wanted } }
+        return chosen ?: lenses.minByOrNull { abs(it.equivMm - 26f) } ?: lenses.firstOrNull()
+    }
+
+    /**
+     * Abre la lente con el pipeline Camera2 propio: la cámara lógica y, si la lente
+     * es una cámara física que el sistema no expone, las salidas enlazadas a ella.
+     * Los frames van a la fuente NDI igual que antes.
+     */
+    private fun openCamera2Lens(lens: CameraLens): Boolean {
+        val req = request ?: return false
+        val view = surfaceView ?: return false
+        val physical = lens.physical
+        val logical = if (physical != null) physical.substringBefore(":") else lens.id
+        val physicalId = physical?.substringAfter(":")
         val source = Camera2LensSource(context)
-        hiddenSource = source
+        camera2Source = source
         source.onStatus = { onStatus?.invoke(it) }
         source.onError = { message ->
             Log.w(TAG, "Camera2: $message")
             onStatus?.invoke(message)
         }
         source.onFrame = { image -> deliverCamera2Frame(image, req.fps) }
-        source.open(
-            key.substringBefore(":"),
-            key.substringAfter(":"),
-            view,
-            req.height,
-            req.fps
-        )
+        source.open(logical, physicalId, view, req.height, req.fps, req.fullSensor)
         minZoom = source.minZoom
         maxZoom = source.maxZoom
         isoRange = source.isoRange
@@ -446,6 +456,7 @@ class CameraSession(private val context: Context) {
         cameraId = lens.id
         onCameraReady?.invoke()
         onStatus?.invoke(if (sender != null) "Enviando «${req.ndiName}»" else "Vista previa")
+        return true
     }
 
     /** Frame YUV de Camera2 -> RGBA -> NDI. */
@@ -511,8 +522,8 @@ class CameraSession(private val context: Context) {
 
     fun stop() {
         stopRecordingInternal(notify = false)
-        hiddenSource?.close()
-        hiddenSource = null
+        camera2Source?.close()
+        camera2Source = null
         request = null
         analysis?.clearAnalyzer()
         analysis = null
@@ -536,7 +547,7 @@ class CameraSession(private val context: Context) {
     fun connections(): Int = sender?.connections() ?: 0
 
     fun setZoom(ratio: Float) {
-        val hidden = hiddenSource
+        val hidden = camera2Source
         if (hidden != null) {
             hidden.setZoom(ratio)
             return
@@ -545,7 +556,7 @@ class CameraSession(private val context: Context) {
     }
 
     fun setExposure(index: Int) {
-        val hidden = hiddenSource
+        val hidden = camera2Source
         if (hidden != null) {
             hidden.setExposureCompensation(index)
             return
@@ -557,7 +568,7 @@ class CameraSession(private val context: Context) {
 
     fun setTorch(on: Boolean) {
         if (on && !hasFlash) return
-        val hidden = hiddenSource
+        val hidden = camera2Source
         if (hidden != null) {
             hidden.setTorch(on)
             return
@@ -567,7 +578,7 @@ class CameraSession(private val context: Context) {
 
     /** Bloquea la exposición automática o vuelve a ella. */
     fun setManualExposure(manual: Boolean) {
-        val hidden = hiddenSource
+        val hidden = camera2Source
         if (hidden != null) {
             hidden.setManualExposure(manual)
             return
@@ -585,7 +596,7 @@ class CameraSession(private val context: Context) {
 
     /** Exposición manual: ISO y velocidad de obturación en nanosegundos. */
     fun setManualExposureValues(iso: Int, shutterNs: Long) {
-        val hidden = hiddenSource
+        val hidden = camera2Source
         if (hidden != null) {
             hidden.setManualExposureValues(iso, shutterNs)
             return
@@ -616,7 +627,7 @@ class CameraSession(private val context: Context) {
 
     /** Foco manual por dioptrías (0 = infinito) o vuelta al enfoque continuo. */
     fun setManualFocus(enabled: Boolean, diopters: Float) {
-        val hidden = hiddenSource
+        val hidden = camera2Source
         if (hidden != null) {
             hidden.setManualFocus(if (enabled) diopters else null)
             return
@@ -643,7 +654,7 @@ class CameraSession(private val context: Context) {
 
     /** Balance de blancos por modo (los presets de la app). */
     fun setWhiteBalance(mode: Int) {
-        val hidden = hiddenSource
+        val hidden = camera2Source
         if (hidden != null) {
             hidden.setWhiteBalance(mode)
             return
@@ -656,10 +667,18 @@ class CameraSession(private val context: Context) {
     }
 
     /** Enfoca el punto tocado en el visor y deja el enfoque en automático. */
-    fun focusAt(x: Float, y: Float) {
+    fun focusAt(nx: Float, ny: Float) {
+        val source = camera2Source
+        if (source != null) {
+            source.focusAt(nx, ny)
+            return
+        }
         setManualFocus(false, 0f)
         val view = previewView ?: return
-        val point = view.meteringPointFactory.createPoint(x, y)
+        val point = view.meteringPointFactory.createPoint(
+            nx * view.width.coerceAtLeast(1),
+            ny * view.height.coerceAtLeast(1)
+        )
         camera?.cameraControl?.startFocusAndMetering(
             FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
                 .setAutoCancelDuration(3, TimeUnit.SECONDS)
@@ -675,6 +694,7 @@ class CameraSession(private val context: Context) {
 
     /** Graba la vista previa en un MP4 dentro de Películas/NDI App. */
     fun startRecording(): Boolean {
+        camera2Source?.let { source -> return startCamera2Recording(source) }
         if (recording != null) return true
         val capture = videoCapture ?: run {
             onStatus?.invoke("Este dispositivo no admite grabación local")
@@ -722,6 +742,11 @@ class CameraSession(private val context: Context) {
     }
 
     private fun stopRecordingInternal(notify: Boolean) {
+        val camera2 = camera2Source
+        if (camera2 != null && camera2.isRecording) {
+            camera2.stopRecording()
+            return
+        }
         val active = recording ?: return
         if (!notify) {
             runCatching { active.stop() }
@@ -730,6 +755,42 @@ class CameraSession(private val context: Context) {
         } else {
             runCatching { active.stop() }
         }
+    }
+
+    /** Graba con el MediaRecorder de la sesión Camera2; el NDI sigue emitiendo. */
+    private fun startCamera2Recording(source: Camera2LensSource): Boolean {
+        if (source.isRecording) return true
+        val req = request ?: return false
+        val root = context.getExternalFilesDir(null) ?: context.filesDir
+        val directory = File(root, "Grabaciones").apply { mkdirs() }
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val file = File(directory, "NDI-App-$stamp.mp4")
+        // El micrófono sólo puede usarlo un cliente a la vez: mientras se graba con
+        // audio, la emisión NDI sigue en vídeo y el micrófono vuelve al terminar.
+        if (req.withAudio) {
+            audio?.stop()
+            audio = null
+            audioSuspendedForRecording = true
+        }
+        source.onRecordingFinished = { recorded, ok ->
+            resumeAudioAfterRecording()
+            mainHandler.post {
+                if (ok && recorded != null) {
+                    publishRecording(recorded)
+                } else {
+                    onStatus?.invoke("No se pudo grabar")
+                    onRecordingFinished?.invoke("No se pudo grabar el vídeo")
+                }
+            }
+        }
+        if (!source.startRecording(file, req.withAudio, req.fps)) {
+            resumeAudioAfterRecording()
+            onStatus?.invoke("Este dispositivo no admite grabación local")
+            return false
+        }
+        onStatus?.invoke("Grabando")
+        onRecordingStarted?.invoke()
+        return true
     }
 
     private fun resumeAudioAfterRecording() {
