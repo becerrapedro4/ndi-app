@@ -265,6 +265,8 @@ private class CameraUi(appContext: Context) {
     var fps by mutableIntStateOf(30)
     // Encuadre de la fuente NDI: 16:9 recorta el sensor, 4:3 usa el sensor completo.
     var fullSensor by mutableStateOf(false)
+    // La barra de zoom se puede ocultar para dejar el visor despejado.
+    var zoomShown by mutableStateOf(true)
     var withAudio by mutableStateOf(true)
     var muted by mutableStateOf(false)
     var grid by mutableStateOf(true)
@@ -906,16 +908,13 @@ private fun CameraScreen(
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
                 }
-                FrameBar(
-                    camera = camera,
-                    lifecycleOwner = lifecycleOwner,
-                    modifier = Modifier.padding(bottom = 5.dp)
-                )
-                ZoomBar(
-                    camera = camera,
-                    lifecycleOwner = lifecycleOwner,
-                    modifier = Modifier.padding(bottom = 5.dp)
-                )
+                if (camera.zoomShown) {
+                    ZoomBar(
+                        camera = camera,
+                        lifecycleOwner = lifecycleOwner,
+                        modifier = Modifier.padding(bottom = 5.dp)
+                    )
+                }
                 if (camera.proOpen) {
                     ProStrip(
                         camera = camera,
@@ -929,6 +928,8 @@ private fun CameraScreen(
                 audio = camera.withAudio && !camera.muted,
                 frontLens = camera.facing == CameraSelector.LENS_FACING_FRONT,
                 quality = "${camera.height}p${camera.fps}",
+                frameLabel = if (camera.fullSensor) "4:3" else "16:9",
+                zoomShown = camera.zoomShown,
                 lensLabel = camera.lenses.getOrNull(camera.lensIndex)?.label.orEmpty(),
                 showLens = camera.facing == CameraSelector.LENS_FACING_BACK &&
                     camera.lenses.size > 1,
@@ -961,6 +962,8 @@ private fun CameraScreen(
                     }
                     camera.restart(lifecycleOwner)
                 },
+                onFrame = { camera.setFrame(!camera.fullSensor, lifecycleOwner) },
+                onZoom = { camera.zoomShown = !camera.zoomShown },
                 onQuality = {
                     val next = when {
                         camera.height == 1080 && camera.fps == 30 -> 1080 to 60
@@ -1140,43 +1143,6 @@ private fun MenuButton(onClick: () -> Unit) {
     }
 }
 
-/** Encuadre de la fuente NDI: 16:9 (recorta el sensor) o 4:3 (sensor completo). */
-@Composable
-private fun FrameBar(
-    camera: CameraUi,
-    lifecycleOwner: LifecycleOwner,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier
-            .widthIn(max = 560.dp)
-            .fillMaxWidth()
-            .glassSurface(
-                shape = RoundedCornerShape(18.dp),
-                tint = Color.Black,
-                fillAlpha = 0.62f,
-                strokeAlpha = 0.32f,
-                elevation = 16
-            )
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-    ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("ENCUADRE", fontSize = 8.sp, color = NdiGlass.Muted)
-            Spacer(Modifier.width(7.dp))
-            ZoomChip("16:9", !camera.fullSensor) { camera.setFrame(false, lifecycleOwner) }
-            Spacer(Modifier.width(5.dp))
-            ZoomChip("4:3", camera.fullSensor) { camera.setFrame(true, lifecycleOwner) }
-            Spacer(Modifier.weight(1f))
-            Text(
-                if (camera.fullSensor) "sensor completo" else "recortado",
-                fontSize = 8.sp,
-                color = NdiGlass.Muted,
-                maxLines = 1
-            )
-        }
-    }
-}
-
 /**
  * Barra de zoom del visor: las lentes del equipo si las expone por separado y,
  * si no, los saltos de aumento del sensor. El pellizco sigue funcionando.
@@ -1296,6 +1262,8 @@ private fun ControlDock(
     audio: Boolean,
     frontLens: Boolean,
     quality: String,
+    frameLabel: String,
+    zoomShown: Boolean,
     lensLabel: String,
     showLens: Boolean,
     torch: Boolean,
@@ -1308,6 +1276,8 @@ private fun ControlDock(
     onAudio: () -> Unit,
     onFlip: () -> Unit,
     onQuality: () -> Unit,
+    onFrame: () -> Unit,
+    onZoom: () -> Unit,
     onHide: () -> Unit,
     proOpen: Boolean,
     onPro: () -> Unit
@@ -1344,6 +1314,8 @@ private fun ControlDock(
                 audio = audio,
                 frontLens = frontLens,
                 quality = quality,
+                frameLabel = frameLabel,
+                zoomShown = zoomShown,
                 lensLabel = lensLabel,
                 showLens = showLens,
                 torch = torch,
@@ -1356,6 +1328,8 @@ private fun ControlDock(
                 onAudio = onAudio,
                 onFlip = onFlip,
                 onQuality = onQuality,
+                onFrame = onFrame,
+                onZoom = onZoom,
                 onHide = onHide,
                 proOpen = proOpen,
                 onPro = onPro
@@ -1374,6 +1348,8 @@ private fun RowScope.DockItems(
     audio: Boolean,
     frontLens: Boolean,
     quality: String,
+    frameLabel: String,
+    zoomShown: Boolean,
     lensLabel: String,
     showLens: Boolean,
     torch: Boolean,
@@ -1386,6 +1362,8 @@ private fun RowScope.DockItems(
     onAudio: () -> Unit,
     onFlip: () -> Unit,
     onQuality: () -> Unit,
+    onFrame: () -> Unit,
+    onZoom: () -> Unit,
     onHide: () -> Unit,
     proOpen: Boolean,
     onPro: () -> Unit
@@ -1403,6 +1381,8 @@ private fun RowScope.DockItems(
     }
     DockAction(DockIcon.FLIP, if (frontLens) "Frontal" else "Girar", frontLens, wide, slot, onFlip)
     DockAction(DockIcon.QUALITY, quality, false, wide, slot, onQuality)
+    DockAction(DockIcon.ASPECT, frameLabel, false, wide, slot, onFrame)
+    DockAction(DockIcon.ZOOM, "Zoom", zoomShown, wide, slot, onZoom)
     DockAction(DockIcon.HIDE, "Ocultar", false, wide, slot, onHide)
     DockAction(DockIcon.SETTINGS, "Pro", proOpen, wide, slot, onPro)
 }
@@ -1449,7 +1429,7 @@ private fun RecordButton(
     }
 }
 
-private enum class DockIcon { GRID, MIC, TORCH, LENS, FLIP, QUALITY, HIDE, SETTINGS, MEDIA }
+private enum class DockIcon { GRID, MIC, TORCH, LENS, FLIP, QUALITY, ASPECT, ZOOM, HIDE, SETTINGS, MEDIA }
 
 @Composable
 private fun DockAction(
@@ -1639,6 +1619,53 @@ private fun DrawScope.drawDockIcon(icon: DockIcon, color: Color) {
         }
 
         DockIcon.QUALITY -> Unit
+
+        // Marco 16:9 y, dentro, la zona 4:3: encuadre de la fuente.
+        DockIcon.ASPECT -> {
+            drawRect(
+                color.copy(alpha = 0.5f),
+                topLeft = Offset(w * 0.05f, h * 0.24f),
+                size = Size(w * 0.9f, h * 0.52f),
+                style = Stroke(width = stroke.width)
+            )
+            drawRect(
+                color,
+                topLeft = Offset(w * 0.22f, h * 0.24f),
+                size = Size(w * 0.56f, h * 0.52f),
+                style = Stroke(width = stroke.width)
+            )
+        }
+
+        // Lupa con el signo +: barra de zoom del visor.
+        DockIcon.ZOOM -> {
+            drawCircle(
+                color,
+                radius = w * 0.28f,
+                center = Offset(w * 0.42f, h * 0.42f),
+                style = Stroke(width = stroke.width)
+            )
+            drawLine(
+                color,
+                Offset(w * 0.63f, h * 0.63f),
+                Offset(w * 0.9f, h * 0.9f),
+                strokeWidth = stroke.width,
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color,
+                Offset(w * 0.26f, h * 0.42f),
+                Offset(w * 0.58f, h * 0.42f),
+                strokeWidth = stroke.width,
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color,
+                Offset(w * 0.42f, h * 0.26f),
+                Offset(w * 0.42f, h * 0.58f),
+                strokeWidth = stroke.width,
+                cap = StrokeCap.Round
+            )
+        }
 
         DockIcon.SETTINGS -> {
             for (i in 0..2) {
