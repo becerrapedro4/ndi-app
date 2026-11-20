@@ -865,8 +865,8 @@ private fun CameraScreen(
     ) {
         val landscape = maxWidth > maxHeight
 
-        // El visor cubre la pantalla con la relación real de la fuente: escala
-        // uniforme y recorte del sobrante, nunca deformación.
+        // El visor muestra el cuadro completo con su proporción real: si sobra
+        // espacio quedan franjas negras, pero la imagen nunca se deforma ni se recorta.
         val sourceAspect = if (camera.previewAspect > 0f) {
             if (landscape) 1f / camera.previewAspect else camera.previewAspect
         } else if (camera.fullSensor) {
@@ -880,7 +880,7 @@ private fun CameraScreen(
             factory = { camera.surfaceView },
             modifier = Modifier
                 .fillMaxSize()
-                .coverViewport(sourceAspect)
+                .fitViewport(sourceAspect)
         )
         if (camera.grid) FramingGrid()
 
@@ -2968,18 +2968,22 @@ private fun MonitorTab(onMenu: () -> Unit) {
 
 // -------------------------------------------------------------- multimedia --
 
-/** Cubre el espacio disponible con [aspect] recortando el sobrante. */
-private fun Modifier.coverViewport(aspect: Float): Modifier = layout { measurable, constraints ->
+/** Encaja la vista en el espacio disponible con [aspect], sin recortar ni deformar. */
+private fun Modifier.fitViewport(aspect: Float): Modifier = layout { measurable, constraints ->
     val maxWidth = constraints.maxWidth
     val maxHeight = constraints.maxHeight
     if (aspect <= 0f || maxWidth <= 0 || maxHeight <= 0) {
         val placeable = measurable.measure(constraints)
         return@layout layout(placeable.width, placeable.height) { placeable.place(0, 0) }
     }
-    val coverWidth = maxOf(maxWidth.toFloat(), maxHeight * aspect)
-    val coverHeight = coverWidth / aspect
+    var fitWidth = maxWidth.toFloat()
+    var fitHeight = fitWidth / aspect
+    if (fitHeight > maxHeight) {
+        fitHeight = maxHeight.toFloat()
+        fitWidth = fitHeight * aspect
+    }
     val placeable = measurable.measure(
-        Constraints.fixed(coverWidth.roundToInt(), coverHeight.roundToInt())
+        Constraints.fixed(fitWidth.roundToInt(), fitHeight.roundToInt())
     )
     layout(maxWidth, maxHeight) {
         placeable.place(
