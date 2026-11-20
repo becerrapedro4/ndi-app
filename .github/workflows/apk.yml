@@ -51,7 +51,8 @@ jobs:
               -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-26 \
               -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
               -DENABLE_ENCRYPTION=OFF -DENABLE_APPS=OFF -DENABLE_SHARED=OFF \
-              -DENABLE_STATIC=ON -DENABLE_BONDING=OFF
+              -DENABLE_STATIC=ON -DENABLE_BONDING=OFF \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_OPENSSL_PC=OFF
             cmake --build "/tmp/srt-build-$abi" -j"$(nproc)"
             cmake --install "/tmp/srt-build-$abi"
             cmake -S tools/srtbuild -B "/tmp/jni-$abi" \
