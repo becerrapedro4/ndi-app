@@ -17,6 +17,7 @@ import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.view.SurfaceView
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -257,8 +258,17 @@ private class CameraUi(appContext: Context) {
         scaleType = PreviewView.ScaleType.FIT_CENTER
     }
 
+    /** Superficie del pipeline Camera2 (lentes físicas que CameraX no expone). */
+    val surfaceView = SurfaceView(appContext)
+
+    init {
+        session.setSurfaceView(surfaceView)
+    }
+
     var running by mutableStateOf(false)
     var previewing by mutableStateOf(false)
+    // Lente física oculta abierta con Camera2: su vista va en un SurfaceView propio.
+    var camera2Active by mutableStateOf(false)
     var status by mutableStateOf("Vista previa")
     var facing by mutableIntStateOf(CameraSelector.LENS_FACING_BACK)
     var height by mutableIntStateOf(1080)
@@ -343,6 +353,7 @@ private fun CameraUi.refreshLens() {
     // La primera apertura usa la cámara trasera por defecto: el índice se ajusta
     // a la que el sensor tiene abierta de verdad, no a la primera de la lista.
     val active = lenses.indexOfFirst { it.id == session.cameraId }
+    camera2Active = session.isCamera2Source
     lensIndex = if (active >= 0) active
     else lensIndex.coerceIn(0, (lenses.size - 1).coerceAtLeast(0))
     session.setMuted(muted)
@@ -814,6 +825,10 @@ private fun CameraScreen(
         val landscape = maxWidth > maxHeight
 
         AndroidView(factory = { camera.previewView }, modifier = Modifier.fillMaxSize())
+        // La lente oculta se dibuja con Camera2 en su propia superficie.
+        if (camera.camera2Active) {
+            AndroidView(factory = { camera.surfaceView }, modifier = Modifier.fillMaxSize())
+        }
         if (camera.grid) FramingGrid()
 
         // Al emitir queda una línea roja fija en el borde superior y, si otro

@@ -4,6 +4,8 @@ import android.content.ContentValues
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.Image
+import android.view.SurfaceView
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.os.Handler
@@ -67,7 +69,9 @@ data class CameraLens(
     val id: String,
     val label: String,
     val focalMm: Float,
-    val equivMm: Float
+    val equivMm: Float,
+    /** Si viene de una cámara física oculta: "lógica:física" (Camera2 propio). */
+    val physical: String? = null
 )
 
 /** Cámara como fuente NDI: vista previa, análisis de frames y audio del micrófono. */
@@ -136,6 +140,10 @@ class CameraSession(private val context: Context) {
     var averageLuma: Float = 0f
         private set
 
+    /** La cámara abierta va por el pipeline Camera2 propio (lente oculta). */
+    val isCamera2Source: Boolean
+        get() = hiddenSource != null
+
     val canRecord: Boolean
         get() = videoCapture != null
 
@@ -158,6 +166,8 @@ class CameraSession(private val context: Context) {
     private var previewView: PreviewView? = null
     private var camera2Control: Camera2CameraControl? = null
 
+    private var hiddenSource: Camera2LensSource? = null
+    private var surfaceView: SurfaceView? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
     private var audioSuspendedForRecording = false
@@ -167,6 +177,11 @@ class CameraSession(private val context: Context) {
 
     val isRunning: Boolean
         get() = sender != null
+
+    /** Superficie donde el pipeline Camera2 dibuja la lente oculta. */
+    fun setSurfaceView(view: SurfaceView) {
+        surfaceView = view
+    }
 
     /** Abre la cámara y mantiene la vista previa, todavía sin emitir por NDI. */
     fun start(previewView: PreviewView, owner: LifecycleOwner, req: CameraRequest) {
@@ -187,6 +202,13 @@ class CameraSession(private val context: Context) {
                 } else {
                     CameraSelector.Builder().requireLensFacing(req.lensFacing).build()
                 }
+                // Lente física que el sistema no deja abrir por su cuenta: se
+                // resuelve con el pipeline Camera2, no con CameraX.
+                rearLenses.firstOrNull { it.id == req.cameraId && it.physical != null }
+                    ?.let { hidden ->
+                        openHiddenLens(hidden)
+                        return@addListener
+                    }
                 val fallbackSelector =
                     CameraSelector.Builder().requireLensFacing(req.lensFacing).build()
                 // 4:3 usa el sensor completo (igual que la cámara del sistema); 16:9
@@ -356,7 +378,10 @@ class CameraSession(private val context: Context) {
         if (raw.isEmpty()) return emptyList()
         // La lente más cercana a 26 mm equivalentes se toma como «1×».
         val main = raw.minByOrNull { abs(it.equivMm - 26f) } ?: raw.first()
-        return raw.map { lens ->
+        // Cámaras físicas dentro de la lógica que CameraX no expone (ultra gran
+        // angular de muchos Xiaomi): se abren con el pipeline Camera2 propio.
+        val hidden = HiddenLenses.back(context, raw.map { it.id }.toSet())
+        val visible = raw.map { lens ->
             val ratio = ((lens.equivMm / main.equivMm.coerceAtLeast(1f)) * 10f).roundToInt() / 10f
             val safe = ratio.coerceAtLeast(0.1f)
             val label = if (abs(safe - safe.roundToInt()) < 0.05f) {
@@ -368,6 +393,85 @@ class CameraSession(private val context: Context) {
         // Un mismo objetivo puede aparecer dos veces (cámara lógica y física):
         // se deja una entrada por campo de visión.
         }.distinctBy { it.label }
+        val extra = hidden
+            .filter { lens -> visible.none { it.label == lens.label } }
+            .map { lens ->
+                CameraLens(
+                    id = lens.key,
+                    label = lens.label,
+                    focalMm = lens.focalMm,
+                    equivMm = lens.equivMm,
+                    physical = lens.key
+                )
+            }
+        return (visible + extra).sortedBy { it.equivMm }
+    }
+
+    /**
+     * Abre una lente física oculta con Camera2: la cámara lógica con las salidas
+     * enlazadas a la cámara física. Los frames van a la fuente NDI igual que en
+     * CameraX.
+     */
+    private fun openHiddenLens(lens: CameraLens) {
+        val req = request ?: return
+        val key = lens.physical ?: return
+        val view = surfaceView
+        if (view == null) {
+            onStatus?.invoke("Falta la superficie de la lente")
+            return
+        }
+        val source = Camera2LensSource(context)
+        hiddenSource = source
+        source.onStatus = { onStatus?.invoke(it) }
+        source.onError = { message ->
+            Log.w(TAG, "Camera2: $message")
+            onStatus?.invoke(message)
+        }
+        source.onFrame = { image -> deliverCamera2Frame(image, req.fps) }
+        source.open(
+            key.substringBefore(":"),
+            key.substringAfter(":"),
+            view,
+            req.height,
+            req.fps
+        )
+        minZoom = source.minZoom
+        maxZoom = source.maxZoom
+        isoRange = source.isoRange
+        exposureTimeRange = source.exposureTimeRange
+        exposureRange = source.exposureRange
+        exposureStep = source.exposureStep
+        minFocusDistance = source.minFocusDistance
+        hasFlash = source.hasFlash
+        cameraId = lens.id
+        onCameraReady?.invoke()
+        onStatus?.invoke(if (sender != null) "Enviando «${req.ndiName}»" else "Vista previa")
+    }
+
+    /** Frame YUV de Camera2 -> RGBA -> NDI. */
+    private fun deliverCamera2Frame(image: Image, fps: Int) {
+        try {
+            val width = image.width
+            val height = image.height
+            val needed = width * height * 4
+            if (rgbaBuffer.size < needed) rgbaBuffer = ByteArray(needed)
+            val y = image.planes[0]
+            val u = image.planes[1]
+            val v = image.planes[2]
+            // El sensor entrega apaisado; en vertical hay que girar 90 grados.
+            val rotation = if (width > height) 90 else 0
+            val dims = Yuv.toRgba(
+                width, height, rotation,
+                y.buffer, y.rowStride, y.pixelStride,
+                u.buffer, u.rowStride, u.pixelStride,
+                v.buffer, v.rowStride, v.pixelStride,
+                rgbaBuffer
+            )
+            averageLuma = Yuv.averageLuma(width, height, y.buffer, y.rowStride, y.pixelStride)
+            sender?.sendVideo(rgbaBuffer, dims[0], dims[1], fps)
+        } catch (t: Throwable) {
+            Log.w(TAG, "No se pudo procesar el frame de Camera2", t)
+        }
     }
 
     /** Crea la fuente NDI y empieza a enviar los frames de la vista previa. */
@@ -407,6 +511,8 @@ class CameraSession(private val context: Context) {
 
     fun stop() {
         stopRecordingInternal(notify = false)
+        hiddenSource?.close()
+        hiddenSource = null
         request = null
         analysis?.clearAnalyzer()
         analysis = null
@@ -430,10 +536,20 @@ class CameraSession(private val context: Context) {
     fun connections(): Int = sender?.connections() ?: 0
 
     fun setZoom(ratio: Float) {
+        val hidden = hiddenSource
+        if (hidden != null) {
+            hidden.setZoom(ratio)
+            return
+        }
         camera?.cameraControl?.setZoomRatio(ratio.coerceIn(minZoom, maxZoom))
     }
 
     fun setExposure(index: Int) {
+        val hidden = hiddenSource
+        if (hidden != null) {
+            hidden.setExposureCompensation(index)
+            return
+        }
         camera?.cameraControl?.setExposureCompensationIndex(
             index.coerceIn(exposureRange.first, exposureRange.last)
         )
@@ -441,11 +557,21 @@ class CameraSession(private val context: Context) {
 
     fun setTorch(on: Boolean) {
         if (on && !hasFlash) return
+        val hidden = hiddenSource
+        if (hidden != null) {
+            hidden.setTorch(on)
+            return
+        }
         camera?.cameraControl?.enableTorch(on)
     }
 
     /** Bloquea la exposición automática o vuelve a ella. */
     fun setManualExposure(manual: Boolean) {
+        val hidden = hiddenSource
+        if (hidden != null) {
+            hidden.setManualExposure(manual)
+            return
+        }
         camera2Control?.addCaptureRequestOptions(
             CaptureRequestOptions.Builder()
                 .setCaptureRequestOption(
@@ -459,6 +585,11 @@ class CameraSession(private val context: Context) {
 
     /** Exposición manual: ISO y velocidad de obturación en nanosegundos. */
     fun setManualExposureValues(iso: Int, shutterNs: Long) {
+        val hidden = hiddenSource
+        if (hidden != null) {
+            hidden.setManualExposureValues(iso, shutterNs)
+            return
+        }
         val period = 1_000_000_000L / (request?.fps ?: 30).coerceAtLeast(1)
         val sensorMax = if (exposureTimeRange.last > 0L) exposureTimeRange.last else period
         val sensorMin = if (exposureTimeRange.first > 0L) exposureTimeRange.first else 1_000L
@@ -485,6 +616,11 @@ class CameraSession(private val context: Context) {
 
     /** Foco manual por dioptrías (0 = infinito) o vuelta al enfoque continuo. */
     fun setManualFocus(enabled: Boolean, diopters: Float) {
+        val hidden = hiddenSource
+        if (hidden != null) {
+            hidden.setManualFocus(if (enabled) diopters else null)
+            return
+        }
         val control = camera2Control ?: return
         val builder = CaptureRequestOptions.Builder()
         if (enabled && minFocusDistance > 0f) {
@@ -507,6 +643,11 @@ class CameraSession(private val context: Context) {
 
     /** Balance de blancos por modo (los presets de la app). */
     fun setWhiteBalance(mode: Int) {
+        val hidden = hiddenSource
+        if (hidden != null) {
+            hidden.setWhiteBalance(mode)
+            return
+        }
         camera2Control?.addCaptureRequestOptions(
             CaptureRequestOptions.Builder()
                 .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, mode)

@@ -1,8 +1,9 @@
 package com.ndiapp.camera.media
 
 import androidx.camera.core.ImageProxy
+import java.nio.ByteBuffer
 
-/** Conversión de frames YUV_420_888 de CameraX a RGBA compacto. */
+/** Conversión de frames YUV_420_888 a RGBA compacto. */
 object Yuv {
 
     /**
@@ -10,25 +11,47 @@ object Yuv {
      * Devuelve [ancho, alto] del resultado.
      */
     fun toRgba(image: ImageProxy, rotationDegrees: Int, buffer: ByteArray): IntArray {
-        val srcW = image.width
-        val srcH = image.height
+        val y = image.planes[0]
+        val u = image.planes[1]
+        val v = image.planes[2]
+        return toRgba(
+            image.width,
+            image.height,
+            rotationDegrees,
+            y.buffer,
+            y.rowStride,
+            y.pixelStride,
+            u.buffer,
+            u.rowStride,
+            u.pixelStride,
+            v.buffer,
+            v.rowStride,
+            v.pixelStride,
+            buffer
+        )
+    }
+
+    /** Igual que la versión de [ImageProxy], pero desde planos de Camera2. */
+    @Suppress("LongParameterList")
+    fun toRgba(
+        srcW: Int,
+        srcH: Int,
+        rotationDegrees: Int,
+        yBuf: ByteBuffer,
+        yRowStride: Int,
+        yPixelStride: Int,
+        uBuf: ByteBuffer,
+        uRowStride: Int,
+        uPixelStride: Int,
+        vBuf: ByteBuffer,
+        vRowStride: Int,
+        vPixelStride: Int,
+        buffer: ByteArray
+    ): IntArray {
         val swap = rotationDegrees == 90 || rotationDegrees == 270
         val dstW = if (swap) srcH else srcW
         val dstH = if (swap) srcW else srcH
         require(buffer.size >= dstW * dstH * 4) { "buffer demasiado pequeño" }
-
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-        val yBuf = yPlane.buffer
-        val uBuf = uPlane.buffer
-        val vBuf = vPlane.buffer
-        val yRowStride = yPlane.rowStride
-        val yPixelStride = yPlane.pixelStride
-        val uRowStride = uPlane.rowStride
-        val uPixelStride = uPlane.pixelStride
-        val vRowStride = vPlane.rowStride
-        val vPixelStride = vPlane.pixelStride
 
         for (sy in 0 until srcH) {
             val yBase = sy * yRowStride
@@ -84,16 +107,26 @@ object Yuv {
      */
     fun averageLuma(image: ImageProxy): Float {
         val plane = image.planes[0]
-        val buffer = plane.buffer
-        val rowStride = plane.rowStride
-        val pixelStride = plane.pixelStride
+        return averageLuma(
+            image.width, image.height, plane.buffer, plane.rowStride, plane.pixelStride
+        )
+    }
+
+    /** Igual que la versión de [ImageProxy], pero con los planos de Camera2. */
+    fun averageLuma(
+        width: Int,
+        height: Int,
+        buffer: ByteBuffer,
+        rowStride: Int,
+        pixelStride: Int
+    ): Float {
         var sum = 0L
         var count = 0
         var y = 0
-        while (y < image.height) {
+        while (y < height) {
             val base = y * rowStride
             var x = 0
-            while (x < image.width) {
+            while (x < width) {
                 sum += buffer.get(base + x * pixelStride).toInt() and 0xFF
                 count++
                 x += 8
