@@ -5,3 +5,6 @@
 -keepclassmembers class * {
     native <methods>;
 }
+
+# Puente JNI con libsrt: R8 no debe renombrar la clase que llama a los nativos.
+-keep class com.ndiapp.camera.net.SrtNative { *; }

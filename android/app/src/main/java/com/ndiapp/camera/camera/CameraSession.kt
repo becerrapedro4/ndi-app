@@ -41,6 +41,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.ndiapp.camera.media.AudioCapture
 import com.ndiapp.camera.media.Yuv
+import com.ndiapp.camera.net.YuvFrame
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiSender
 import java.io.File
@@ -102,6 +103,12 @@ class CameraSession(private val context: Context) {
      * ya rotado, para que lo que se ve sea exactamente lo que se emite.
      */
     var onPreviewFrame: ((Bitmap) -> Unit)? = null
+
+    /**
+     * Cuadro YUV crudo de la cámara. Lo usa la transmisión SRT: así se codifica
+     * sin abrir otra salida en la sesión de Camera2, que seguiría intacta.
+     */
+    var onYuvFrame: ((YuvFrame) -> Unit)? = null
 
     /** La cámara ya está abierta y sus rangos reales (ISO, EV, obturación) leídos. */
     var onCameraReady: (() -> Unit)? = null
@@ -487,6 +494,17 @@ class CameraSession(private val context: Context) {
             val y = image.planes[0]
             val u = image.planes[1]
             val v = image.planes[2]
+            onYuvFrame?.let { callback ->
+                callback(
+                    YuvFrame(
+                        width, height,
+                        y.buffer, y.rowStride, y.pixelStride,
+                        u.buffer, u.rowStride, u.pixelStride,
+                        v.buffer, v.rowStride, v.pixelStride,
+                        image.timestamp
+                    )
+                )
+            }
             // El sensor entrega apaisado; en vertical hay que girar 90 grados.
             val rotation = if (width > height) 90 else 0
             val dims = Yuv.toRgba(

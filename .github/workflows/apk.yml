@@ -33,6 +33,36 @@ jobs:
                "android/app/src/main/jniLibs/$abi/"
           done
 
+      # libsrt (MPL-2.0) se compila para las dos ABIs sin cifrado (no necesita
+      # OpenSSL) y se enlaza con el puente JNI en libsrt_app.so. Con esto el APK
+      # trae SRT de verdad, sin tocar la compilación de NDI.
+      - name: Compilar libsrt y el puente JNI
+        run: |
+          set -eux
+          curl -fsSL -o /tmp/srt.tar.gz \
+            "https://github.com/Haivision/srt/archive/refs/tags/v1.5.3.tar.gz"
+          mkdir -p /tmp/srt-src
+          tar -xzf /tmp/srt.tar.gz -C /tmp/srt-src --strip-components=1
+          NDK="$ANDROID_NDK_LATEST_HOME"
+          for abi in arm64-v8a armeabi-v7a; do
+            prefix="/tmp/srt-$abi"
+            cmake -S /tmp/srt-src -B "/tmp/srt-build-$abi" \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-26 \
+              -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
+              -DENABLE_ENCRYPTION=OFF -DENABLE_APPS=OFF -DENABLE_SHARED=OFF \
+              -DENABLE_STATIC=ON -DENABLE_BONDING=OFF
+            cmake --build "/tmp/srt-build-$abi" -j"$(nproc)"
+            cmake --install "/tmp/srt-build-$abi"
+            cmake -S tools/srtbuild -B "/tmp/jni-$abi" \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-26 \
+              -DCMAKE_BUILD_TYPE=Release -DSRT_ROOT="$prefix"
+            cmake --build "/tmp/jni-$abi" -j"$(nproc)"
+            mkdir -p "android/app/src/main/jniLibs/$abi"
+            cp "/tmp/jni-$abi/out/libsrt_app.so" "android/app/src/main/jniLibs/$abi/"
+          done
+
       - name: Compilar APK de release
         run: |
           cd android

@@ -123,6 +123,7 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -142,6 +143,9 @@ import com.ndiapp.camera.ndi.NdiFinder
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiReceiverController
 import com.ndiapp.camera.ndi.StreamStats
+import com.ndiapp.camera.net.SrtDataSource
+import com.ndiapp.camera.net.SrtNative
+import com.ndiapp.camera.net.SrtTransmitter
 import com.ndiapp.camera.ndi.NdiSource
 import com.ndiapp.camera.usb.UvcCamera
 import com.ndiapp.camera.usb.UvcCameras
@@ -237,6 +241,8 @@ private fun AppRoot() {
             MenuSheet(
                 screen = screen,
                 version = camera.version,
+                srtTxUrl = camera.srtTxUrl,
+                onSrtTxUrl = { url -> camera.setSrtTxUrl(url) },
                 onSelect = { target ->
                     screen = target
                     if (target == Screen.CAMERA) {
@@ -271,6 +277,16 @@ private fun AppRoot() {
 /** La app está en ventana flotante (picture-in-picture) mostrando el monitor. */
 private val pipActive = mutableStateOf(false)
 
+/**
+ * Silencio compartido: el chip de audio de la cámara también enmudece lo que se
+ * está reproduciendo en el monitor (NDI, RTSP o SRT).
+ */
+private val monitorMuted = mutableStateOf(false)
+
+/** Naranja para SRT y verde para RTSP, como se pidió en la interfaz. */
+private val SrtOrange = Color(0xFFFF8A3D)
+private val RtspGreen = Color(0xFF35D07F)
+
 /** Pone la app en ventana flotante con la forma del vídeo del monitor. */
 private fun enterPip(activity: Activity?, aspect: Float = 16f / 9f) {
     if (activity == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -302,6 +318,15 @@ private class CameraUi(appContext: Context) {
 
     /** Visor propio: dibuja los cuadros de la cámara sin recomponer la pantalla. */
     val cameraView = CameraPreviewView(appContext)
+
+    /** Preferencias de las salidas en vivo (se configuran desde el menú). */
+    val prefs = appContext.getSharedPreferences("ndi_app", Context.MODE_PRIVATE)
+
+    /** Transmisión SRT: codifica los cuadros de la cámara y los empuja por SRT. */
+    val srtTx = SrtTransmitter()
+    var srtTxRunning by mutableStateOf(false)
+    var srtTxUrl by mutableStateOf(prefs.getString("srt_tx", "").orEmpty())
+    var srtTxStatus by mutableStateOf("")
 
     init {
         session.setSurfaceView(surfaceView)
@@ -671,6 +696,7 @@ private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
         Handler(Looper.getMainLooper()).post { refreshLens() }
     }
     session.onPreviewFrame = { bitmap -> cameraView.setFrame(bitmap) }
+    session.onYuvFrame = { frame -> if (srtTxRunning) srtTx.send(frame) }
     session.start(previewView, lifecycleOwner, cameraRequest())
     previewing = true
     status = "Vista previa"
@@ -695,6 +721,43 @@ private fun CameraUi.stop() {
 }
 
 /** Inicia o detiene la grabación local de la vista previa. */
+/** Guarda la URL de transmisión SRT: sin URL el botón no aparece. */
+private fun CameraUi.setSrtTxUrl(url: String) {
+    srtTxUrl = url.trim()
+    prefs.edit().putString("srt_tx", srtTxUrl).apply()
+}
+
+/** Arranca o corta la transmisión SRT hacia la URL configurada. */
+private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
+    if (srtTxRunning) {
+        srtTx.stop()
+        srtTxRunning = false
+        srtTxStatus = ""
+        return
+    }
+    if (srtTxUrl.isBlank()) return
+    if (!SrtNative.available) {
+        srtTxStatus = "SRT no está en este APK"
+        return
+    }
+    openPreview(lifecycleOwner)
+    val width = if (fullSensor) height * 3 / 4 else height * 16 / 9
+    srtTx.onStatus = { message ->
+        Handler(Looper.getMainLooper()).post { srtTxStatus = message }
+    }
+    srtTx.onError = { message ->
+        Handler(Looper.getMainLooper()).post {
+            srtTxStatus = message
+            srtTxRunning = false
+        }
+    }
+    srtTx.onStopped = {
+        Handler(Looper.getMainLooper()).post { srtTxRunning = false }
+    }
+    srtTx.start(srtTxUrl, width, height, fps)
+    srtTxRunning = true
+}
+
 private fun CameraUi.toggleRecording() {
     if (recording) {
         session.stopRecording()
@@ -1015,12 +1078,15 @@ private fun CameraScreen(
                 onStream = {
                     if (camera.running) camera.stop() else camera.start(lifecycleOwner)
                 },
+                // El mismo chip silencia NDI y lo que suene en el monitor.
                 onAudio = {
                     if (camera.running) {
                         camera.muted = !camera.muted
                         camera.session.setMuted(camera.muted)
+                        monitorMuted.value = camera.muted
                     } else {
                         camera.withAudio = !camera.withAudio
+                        monitorMuted.value = !camera.withAudio
                     }
                 },
                 onFlip = {
@@ -1046,6 +1112,9 @@ private fun CameraScreen(
                 },
                 // Solo oculta la interfaz: la emisión sigue activa.
                 onHide = { chrome = false },
+                showSrt = camera.srtTxUrl.isNotBlank(),
+                srtOn = camera.srtTxRunning,
+                onSrt = { camera.toggleSrtTx(lifecycleOwner) },
                 proOpen = camera.proOpen,
                 onPro = { camera.proOpen = !camera.proOpen }
             )
@@ -1349,7 +1418,10 @@ private fun ControlDock(
     onZoom: () -> Unit,
     onHide: () -> Unit,
     proOpen: Boolean,
-    onPro: () -> Unit
+    onPro: () -> Unit,
+    showSrt: Boolean,
+    srtOn: Boolean,
+    onSrt: () -> Unit
 ) {
     // En landscape hay sitio de sobra: el dock se limita a un ancho cómodo y
     // reparte las acciones a partes iguales para que no queden apretadas.
@@ -1401,7 +1473,10 @@ private fun ControlDock(
                 onZoom = onZoom,
                 onHide = onHide,
                 proOpen = proOpen,
-                onPro = onPro
+                onPro = onPro,
+                showSrt = showSrt,
+                srtOn = srtOn,
+                onSrt = onSrt
             )
         }
     }
@@ -1435,11 +1510,16 @@ private fun RowScope.DockItems(
     onZoom: () -> Unit,
     onHide: () -> Unit,
     proOpen: Boolean,
-    onPro: () -> Unit
+    onPro: () -> Unit,
+    showSrt: Boolean,
+    srtOn: Boolean,
+    onSrt: () -> Unit
 ) {
     val slot = if (wide) Modifier.weight(1f) else Modifier
     DockAction(DockIcon.GRID, "Grilla", grid, wide, slot, onGrid)
     StreamButton(streaming, wide, slot, onStream)
+    // Solo aparece cuando hay una salida SRT configurada.
+    if (showSrt) TxButton("SRT", srtOn, SrtOrange, wide, slot, onSrt)
     RecordButton(recording, wide, slot, onRecord)
     DockAction(DockIcon.MIC, "Mic", audio, wide, slot, onAudio)
     if (showTorch) {
@@ -1601,6 +1681,55 @@ private fun StreamButton(
             fontSize = if (wide) 10.sp else 9.sp,
             fontWeight = if (streaming) FontWeight.SemiBold else FontWeight.Normal,
             color = if (streaming) NdiGlass.BlueBright else Color.White.copy(alpha = 0.72f)
+        )
+    }
+}
+
+/** Botón de salida en vivo: SRT en naranja, RTSP en verde. */
+@Composable
+private fun TxButton(
+    label: String,
+    active: Boolean,
+    accent: Color,
+    wide: Boolean,
+    slot: Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = slot
+            .then(if (wide) Modifier else Modifier.width(62.dp))
+            .clip(RoundedCornerShape(14.dp))
+            .clickable { onClick() }
+            .padding(vertical = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            Modifier
+                .size(if (wide) 42.dp else 38.dp)
+                .background(
+                    if (active) accent else accent.copy(alpha = 0.16f),
+                    RoundedCornerShape(12.dp)
+                )
+                .border(
+                    1.dp,
+                    accent.copy(alpha = if (active) 0.95f else 0.5f),
+                    RoundedCornerShape(12.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                label,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Black,
+                color = if (active) Color(0xFF10161C) else accent
+            )
+        }
+        Spacer(Modifier.height(3.dp))
+        Text(
+            if (active) "Detener" else "Enviar",
+            fontSize = if (wide) 10.sp else 9.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (active) accent else Color.White.copy(alpha = 0.72f)
         )
     }
 }
@@ -2092,6 +2221,8 @@ private fun VerticalZoom(
 private fun MenuSheet(
     screen: Screen,
     version: String,
+    srtTxUrl: String,
+    onSrtTxUrl: (String) -> Unit,
     onSelect: (Screen) -> Unit
 ) {
     ModalDrawerSheet(
@@ -2163,6 +2294,7 @@ private fun MenuSheet(
                 subtitle = "Ver las fuentes NDI de la red",
                 selected = screen == Screen.MONITOR
             ) { onSelect(Screen.MONITOR) }
+            OutboundPanel(srtUrl = srtTxUrl, onSrtUrl = onSrtTxUrl)
             Spacer(Modifier.weight(1f))
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
             Spacer(Modifier.height(10.dp))
@@ -2172,6 +2304,65 @@ private fun MenuSheet(
                 color = NdiGlass.Muted.copy(alpha = 0.8f)
             )
         }
+    }
+}
+
+/**
+ * Configuración de la salida SRT desde el menú. La URL se guarda y con eso
+ * aparece el botón naranja en la cámara; sin URL no hay botón.
+ */
+@Composable
+private fun OutboundPanel(srtUrl: String, onSrtUrl: (String) -> Unit) {
+    var draft by remember(srtUrl) { mutableStateOf(srtUrl) }
+    Column(Modifier.fillMaxWidth().padding(top = 14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Salida SRT",
+                style = MaterialTheme.typography.labelLarge,
+                color = SrtOrange,
+                modifier = Modifier.weight(1f)
+            )
+            GlassChip("Guardar", draft.trim() == srtUrl, accent = SrtOrange) {
+                onSrtUrl(draft)
+            }
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+                .glassSurface(
+                    shape = RoundedCornerShape(14.dp),
+                    fillAlpha = 0.08f,
+                    elevation = 3
+                )
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.weight(1f)) {
+                if (draft.isEmpty()) {
+                    Text(
+                        "srt://host:9000?mode=caller",
+                        color = NdiGlass.Muted,
+                        fontSize = 13.sp
+                    )
+                }
+                androidx.compose.foundation.text.BasicTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                        color = NdiGlass.Text,
+                        fontSize = 13.sp
+                    ),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(SrtOrange)
+                )
+            }
+        }
+        Text(
+            "H.264 en MPEG-TS. Con la URL guardada aparece el botón naranja en la cámara.",
+            style = MaterialTheme.typography.labelSmall,
+            color = NdiGlass.Muted
+        )
     }
 }
 
@@ -2267,16 +2458,22 @@ private fun GlassChip(
     label: String,
     active: Boolean,
     enabled: Boolean = true,
+    accent: Color? = null,
     onClick: () -> Unit
 ) {
     val shape = RoundedCornerShape(50)
+    val highlight = accent ?: NdiGlass.BlueBright
     Row(
         Modifier
             .clip(shape)
             .background(
                 if (active) {
                     Brush.verticalGradient(
-                        listOf(Color(0xFF66BAFF), NdiGlass.Blue)
+                        if (accent != null) {
+                            listOf(accent.copy(alpha = 0.95f), accent.copy(alpha = 0.72f))
+                        } else {
+                            listOf(Color(0xFF66BAFF), NdiGlass.Blue)
+                        }
                     )
                 } else {
                     Brush.verticalGradient(
@@ -2289,7 +2486,7 @@ private fun GlassChip(
             )
             .border(
                 1.dp,
-                if (active) NdiGlass.BlueBright.copy(alpha = 0.9f)
+                if (active) highlight.copy(alpha = 0.9f)
                 else Color.White.copy(alpha = 0.22f),
                 shape
             )
@@ -2590,10 +2787,17 @@ private fun MonitorTab(onMenu: () -> Unit) {
         mutableStateOf(prefs.getStringSet("ips", emptySet())?.sorted().orEmpty())
     }
     var newIp by remember { mutableStateOf("") }
-    // Recepción RTSP: URL pegada por el usuario y reproductor en curso.
+    // Recepción de red: RTSP (verde) o SRT (naranja), con la URL de cada uno.
+    var rxMode by rememberSaveable {
+        mutableStateOf(prefs.getString("rxmode", "rtsp").orEmpty())
+    }
     var rtspUrl by rememberSaveable {
         mutableStateOf(prefs.getString("rtsp", "").orEmpty())
     }
+    var srtUrl by rememberSaveable {
+        mutableStateOf(prefs.getString("srt", "").orEmpty())
+    }
+    val rxUrl = if (rxMode == "srt") srtUrl else rtspUrl
     var player by remember { mutableStateOf<ExoPlayer?>(null) }
     var rtspError by remember { mutableStateOf<String?>(null) }
     val openSource: (NdiSource) -> Unit = { chosen ->
@@ -2614,8 +2818,8 @@ private fun MonitorTab(onMenu: () -> Unit) {
         )
     }
 
-    /** Reproduce una URL rtsp:// con el reproductor del sistema multimedia. */
-    val playRtsp: (String) -> Unit = { raw ->
+    /** Reproduce una URL rtsp:// o srt:// en el monitor. */
+    val playStream: (String) -> Unit = { raw ->
         val address = raw.trim()
         if (address.isNotEmpty()) {
             player?.release()
@@ -2623,8 +2827,18 @@ private fun MonitorTab(onMenu: () -> Unit) {
             playing = null
             frame = null
             receiver.stop()
+            val isSrt = address.startsWith("srt://", ignoreCase = true)
             val built = ExoPlayer.Builder(context).build()
-            built.setMediaItem(ExoMediaItem.fromUri(address))
+            if (isSrt) {
+                // SRT sólo transporta bytes: se lee el MPEG-TS con ExoPlayer.
+                built.setMediaSource(
+                    ProgressiveMediaSource.Factory(SrtDataSource.Factory())
+                        .createMediaSource(ExoMediaItem.fromUri(address))
+                )
+            } else {
+                built.setMediaItem(ExoMediaItem.fromUri(address))
+            }
+            built.volume = if (monitorMuted.value) 0f else 1f
             built.playWhenReady = true
             built.addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
@@ -2633,8 +2847,13 @@ private fun MonitorTab(onMenu: () -> Unit) {
             })
             built.prepare()
             player = built
-            prefs.edit().putString("rtsp", address).apply()
+            prefs.edit().putString(if (isSrt) "srt" else "rtsp", address).apply()
         }
+    }
+
+    // El chip de audio de la cámara también enmudece lo que suena acá.
+    LaunchedEffect(monitorMuted.value, player) {
+        player?.volume = if (monitorMuted.value) 0f else 1f
     }
     val stopRtsp: () -> Unit = {
         player?.release()
@@ -2747,8 +2966,11 @@ private fun MonitorTab(onMenu: () -> Unit) {
                             GlassChip("Menú", false) { onMenu() }
                             StatusPill(
                                 running = playing != null || player != null,
-                                text = playing?.name
-                                    ?: if (player != null) "RTSP" else "Monitor NDI"
+                                text = playing?.name ?: when {
+                                    player != null && rxMode == "srt" -> "SRT"
+                                    player != null -> "RTSP"
+                                    else -> "Monitor NDI"
+                                }
                             )
                         }
                         Row(
@@ -2811,13 +3033,27 @@ private fun MonitorTab(onMenu: () -> Unit) {
                     GlassPanel {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                "RTSP",
+                                "Recepción",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = NdiGlass.Text,
                                 modifier = Modifier.weight(1f)
                             )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                GlassChip("RTSP", rxMode == "rtsp", accent = RtspGreen) {
+                                    if (player == null) rxMode = "rtsp"
+                                }
+                                GlassChip("SRT", rxMode == "srt", accent = SrtOrange) {
+                                    if (player == null) rxMode = "srt"
+                                }
+                            }
+                            Spacer(Modifier.width(8.dp))
                             GlassChip(if (player != null) "Parar" else "Ver", player != null) {
-                                if (player != null) stopRtsp() else playRtsp(rtspUrl)
+                                if (player != null) {
+                                    stopRtsp()
+                                } else {
+                                    prefs.edit().putString("rxmode", rxMode).apply()
+                                    playStream(rxUrl)
+                                }
                             }
                         }
                         Row(
@@ -2833,16 +3069,19 @@ private fun MonitorTab(onMenu: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(Modifier.weight(1f)) {
-                                if (rtspUrl.isEmpty()) {
+                                if (rxUrl.isEmpty()) {
                                     Text(
-                                        "rtsp://usuario:clave@host:554/stream",
+                                        if (rxMode == "srt") "srt://host:9000"
+                                        else "rtsp://usuario:clave@host:554/stream",
                                         color = NdiGlass.Muted,
                                         fontSize = 13.sp
                                     )
                                 }
                                 androidx.compose.foundation.text.BasicTextField(
-                                    value = rtspUrl,
-                                    onValueChange = { rtspUrl = it },
+                                    value = rxUrl,
+                                    onValueChange = { value ->
+                                        if (rxMode == "srt") srtUrl = value else rtspUrl = value
+                                    },
                                     singleLine = true,
                                     textStyle = MaterialTheme.typography.bodyMedium.copy(
                                         color = NdiGlass.Text,
@@ -2855,8 +3094,12 @@ private fun MonitorTab(onMenu: () -> Unit) {
                             }
                         }
                         Text(
-                            rtspError?.let { "RTSP: $it" }
-                                ?: "Pegá una URL rtsp:// y tocá Ver.",
+                            rtspError?.let { if (rxMode == "srt") "SRT: $it" else "RTSP: $it" }
+                                ?: if (rxMode == "srt") {
+                                    "Pegá una URL srt:// (MPEG-TS) y tocá Ver."
+                                } else {
+                                    "Pegá una URL rtsp:// y tocá Ver."
+                                },
                             style = MaterialTheme.typography.bodySmall,
                             color = NdiGlass.Muted
                         )
