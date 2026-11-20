@@ -212,8 +212,8 @@ class Camera2LensSource(private val context: Context) {
 
     private fun startSessionIfReady() {
         val camera = device ?: return
-        val surface = previewSurface ?: return
         if (session != null) return
+        val surface = previewSurface
         val analysisSize = pendingAnalysisSize ?: Size(1280, 720)
         if (reader == null) {
             val created = ImageReader.newInstance(
@@ -236,18 +236,18 @@ class Camera2LensSource(private val context: Context) {
         val analysis = reader ?: return
 
         val outputs = mutableListOf<OutputConfiguration>()
-        val previewConfig = OutputConfiguration(surface)
+        val previewConfig = surface?.let { OutputConfiguration(it) }
         val analysisConfig = OutputConfiguration(analysis.surface)
         val recorderSurface = recorderSurface()
         val videoConfig = recorderSurface?.let { OutputConfiguration(it) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && physicalId != null) {
             runCatching {
-                previewConfig.setPhysicalCameraId(physicalId)
+                previewConfig?.setPhysicalCameraId(physicalId)
                 analysisConfig.setPhysicalCameraId(physicalId)
                 videoConfig?.setPhysicalCameraId(physicalId)
             }.onFailure { Log.w(TAG, "Salida física no admitida: ${it.message}") }
         }
-        outputs += previewConfig
+        previewConfig?.let { outputs += it }
         outputs += analysisConfig
         videoConfig?.let { outputs += it }
 

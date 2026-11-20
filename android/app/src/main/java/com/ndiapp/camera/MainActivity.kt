@@ -331,6 +331,8 @@ private class CameraUi(appContext: Context) {
     var connections by mutableIntStateOf(0)
     // Relación real del cuadro que entrega la lente (alto / ancho en vertical).
     var previewAspect by mutableFloatStateOf(0f)
+    // Último cuadro de la cámara, ya rotado: lo dibuja el visor propio.
+    var previewFrame by mutableStateOf<Bitmap?>(null)
     var zoom by mutableFloatStateOf(1f)
     var minZoom by mutableFloatStateOf(1f)
     var maxZoom by mutableFloatStateOf(1f)
@@ -667,6 +669,7 @@ private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
     session.onCameraReady = {
         Handler(Looper.getMainLooper()).post { refreshLens() }
     }
+    session.onPreviewFrame = { bitmap -> previewFrame = bitmap }
     session.start(previewView, lifecycleOwner, cameraRequest())
     previewing = true
     status = "Vista previa"
@@ -870,22 +873,12 @@ private fun CameraScreen(
     ) {
         val landscape = maxWidth > maxHeight
 
-        // El visor muestra el cuadro completo con su proporción real: si sobra
-        // espacio quedan franjas negras, pero la imagen nunca se deforma ni se recorta.
-        val sourceAspect = if (camera.previewAspect > 0f) {
-            if (landscape) 1f / camera.previewAspect else camera.previewAspect
-        } else if (camera.fullSensor) {
-            if (landscape) 4f / 3f else 3f / 4f
-        } else if (landscape) {
-            16f / 9f
-        } else {
-            9f / 16f
-        }
+        // El visor dibuja los mismos cuadros que van a NDI con su proporción:
+        // franjas negras si sobra espacio, nunca deformación.
         AndroidView(
-            factory = { camera.surfaceView },
-            modifier = Modifier
-                .fillMaxSize()
-                .fitViewport(sourceAspect)
+            factory = { ctx -> CameraPreviewView(ctx) },
+            update = { view -> camera.previewFrame?.let { frame -> view.setFrame(frame) } },
+            modifier = Modifier.fillMaxSize()
         )
         if (camera.grid) FramingGrid()
 
@@ -3100,6 +3093,50 @@ private fun Modifier.fitViewport(aspect: Float): Modifier = layout { measurable,
             ((maxWidth - placeable.width) / 2f).roundToInt(),
             ((maxHeight - placeable.height) / 2f).roundToInt()
         )
+    }
+}
+
+/**
+ * Dibuja un cuadro de cámara en RGBA encajado en el espacio disponible.
+ *
+ * El búfer llega en orden RGBA y el mapa de bits se interpreta como ARGB, así que
+ * se intercambian rojo y azul al pintar; el escalado es uniforme (min) para que la
+ * imagen nunca se deforme.
+ */
+private class CameraPreviewView(context: Context) : android.view.View(context) {
+
+    private var bitmap: Bitmap? = null
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val target = Rect()
+
+    init {
+        val swap = android.graphics.ColorMatrix()
+        swap.set(
+            floatArrayOf(
+                0f, 0f, 1f, 0f, 0f,
+                0f, 1f, 0f, 0f, 0f,
+                1f, 0f, 0f, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            )
+        )
+        paint.colorFilter = android.graphics.ColorMatrixColorFilter(swap)
+    }
+
+    fun setFrame(frame: Bitmap) {
+        bitmap = frame
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        canvas.drawColor(AndroidColor.BLACK)
+        val bmp = bitmap ?: return
+        val scale = minOf(width.toFloat() / bmp.width, height.toFloat() / bmp.height)
+        val drawW = (bmp.width * scale).toInt()
+        val drawH = (bmp.height * scale).toInt()
+        val left = (width - drawW) / 2
+        val top = (height - drawH) / 2
+        target.set(left, top, left + drawW, top + drawH)
+        canvas.drawBitmap(bmp, null, target, paint)
     }
 }
 

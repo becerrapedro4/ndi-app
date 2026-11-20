@@ -1,6 +1,7 @@
 package com.ndiapp.camera.camera
 
 import android.content.ContentValues
+import android.graphics.Bitmap
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -43,6 +44,7 @@ import com.ndiapp.camera.media.Yuv
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiSender
 import java.io.File
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -94,6 +96,12 @@ class CameraSession(private val context: Context) {
     /** La grabación local empezó o terminó (fin con el nombre del archivo o el error). */
     var onRecordingStarted: (() -> Unit)? = null
     var onRecordingFinished: ((String) -> Unit)? = null
+
+    /**
+     * Cuadro listo para el visor propio. Se entrega el mismo búfer que va a NDI,
+     * ya rotado, para que lo que se ve sea exactamente lo que se emite.
+     */
+    var onPreviewFrame: ((Bitmap) -> Unit)? = null
 
     /** La cámara ya está abierta y sus rangos reales (ISO, EV, obturación) leídos. */
     var onCameraReady: (() -> Unit)? = null
@@ -168,6 +176,8 @@ class CameraSession(private val context: Context) {
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var rgbaBuffer = ByteArray(0)
+    private var previewBitmap: Bitmap? = null
+    private var previewBuffer: ByteBuffer? = null
     private var previewView: PreviewView? = null
     private var camera2Control: Camera2CameraControl? = null
 
@@ -484,10 +494,33 @@ class CameraSession(private val context: Context) {
                 rgbaBuffer
             )
             averageLuma = Yuv.averageLuma(width, height, y.buffer, y.rowStride, y.pixelStride)
+            publishPreview(dims[0], dims[1])
             sender?.sendVideo(rgbaBuffer, dims[0], dims[1], fps)
         } catch (t: Throwable) {
             Log.w(TAG, "No se pudo procesar el frame de Camera2", t)
         }
+    }
+
+    /**
+     * Copia el cuadro RGBA a un mapa de bits y avisa al visor. El mapa se reutiliza
+     * mientras el tamaño no cambie: crear uno por cuadro a 1080p cuesta demasiado.
+     */
+    private fun publishPreview(width: Int, height: Int) {
+        val callback = onPreviewFrame ?: return
+        if (width <= 0 || height <= 0) return
+        val bytes = width * height * 4
+        if (bytes > rgbaBuffer.size) return
+        val bitmap = previewBitmap?.takeIf { it.width == width && it.height == height }
+            ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+                previewBitmap = it
+            }
+        val buffer = previewBuffer?.takeIf { it.capacity() >= bytes }
+            ?: ByteBuffer.allocateDirect(bytes).also { previewBuffer = it }
+        buffer.clear()
+        buffer.put(rgbaBuffer, 0, bytes)
+        buffer.rewind()
+        bitmap.copyPixelsFromBuffer(buffer)
+        callback(bitmap)
     }
 
     /** Crea la fuente NDI y empieza a enviar los frames de la vista previa. */
