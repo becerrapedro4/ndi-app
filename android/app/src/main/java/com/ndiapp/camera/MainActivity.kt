@@ -119,7 +119,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -2631,7 +2631,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
             frame = null
             receiver.stop()
             val built = ExoPlayer.Builder(context).build()
-            built.setMediaItem(MediaItem.fromUri(address))
+            built.setMediaItem(ExoMediaItem.fromUri(address))
             built.playWhenReady = true
             built.addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
