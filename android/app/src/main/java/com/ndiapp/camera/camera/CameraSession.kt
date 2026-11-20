@@ -140,6 +140,10 @@ class CameraSession(private val context: Context) {
     var averageLuma: Float = 0f
         private set
 
+    /** Relación del cuadro que dibuja el visor (alto / ancho en vertical). */
+    var previewAspect: Float = 0f
+        private set
+
     /** La cámara abierta va por el pipeline Camera2 propio (lente oculta). */
     val isCamera2Source: Boolean
         get() = camera2Source != null
@@ -445,6 +449,7 @@ class CameraSession(private val context: Context) {
         }
         source.onFrame = { image -> deliverCamera2Frame(image, req.fps) }
         source.open(logical, physicalId, view, req.height, req.fps, req.fullSensor)
+        previewAspect = source.previewAspect
         minZoom = source.minZoom
         maxZoom = source.maxZoom
         isoRange = source.isoRange

@@ -76,6 +76,14 @@ class Camera2LensSource(private val context: Context) {
     var previewSize: Size? = null
         private set
 
+    /**
+     * Relación del cuadro tal como se ve en vertical (alto / ancho). El sensor
+     * entrega apaisado y el sistema gira la superficie, así que el visor no puede
+     * suponer 16:9 o 4:3: usa el tamaño que la lente entrega de verdad.
+     */
+    var previewAspect: Float = 0f
+        private set
+
     val isRecording: Boolean
         get() = recorder != null
 
@@ -164,6 +172,13 @@ class Camera2LensSource(private val context: Context) {
         pendingAnalysisSize = chooseSize(map?.getOutputSizes(ImageFormat.YUV_420_888), height, fullSensor)
         previewSize = chooseSize(map?.getOutputSizes(SurfaceHolder::class.java), height, fullSensor)
             ?: pendingAnalysisSize
+        previewSize?.let { size ->
+            previewAspect = if (sensorOrientation % 180 == 90) {
+                size.height.toFloat() / size.width.toFloat()
+            } else {
+                size.width.toFloat() / size.height.toFloat()
+            }
+        }
 
         runCatching { manager.openCamera(logicalId, deviceCallback, mainHandler) }
             .onFailure {

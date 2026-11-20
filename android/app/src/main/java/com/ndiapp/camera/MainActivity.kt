@@ -2,6 +2,7 @@ package com.ndiapp.camera
 
 import android.Manifest
 import android.app.Activity
+import android.app.PictureInPictureParams
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -16,7 +17,9 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
+import android.content.res.Configuration
 import android.os.Build
+import android.util.Rational
 import android.view.SurfaceView
 import android.os.Bundle
 import android.os.Handler
@@ -106,11 +109,13 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -147,6 +152,14 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipActive.value = isInPictureInPictureMode
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Cualquier fallo queda anotado y se muestra al abrir la app otra vez.
@@ -250,6 +263,22 @@ private fun AppRoot() {
 
 // ------------------------------------------------------ estado de la cámara --
 
+/** La app está en ventana flotante (picture-in-picture) mostrando el monitor. */
+private val pipActive = mutableStateOf(false)
+
+/** Pone la app en ventana flotante con la forma del vídeo del monitor. */
+private fun enterPip(activity: Activity?, aspect: Float = 16f / 9f) {
+    if (activity == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    if (activity.isInPictureInPictureMode) return
+    runCatching {
+        val ratio = if (aspect >= 1f) Rational(16, 9) else Rational(9, 16)
+        val params = PictureInPictureParams.Builder()
+            .setAspectRatio(ratio)
+            .build()
+        activity.enterPictureInPictureMode(params)
+    }
+}
+
 /** Último fallo no controlado, para mostrarlo en el estado de la cámara. */
 private var lastCrashText: String? = null
 
@@ -295,6 +324,8 @@ private class CameraUi(appContext: Context) {
     var recordSeconds by mutableIntStateOf(0)
     var recordNotice by mutableStateOf<String?>(null)
     var connections by mutableIntStateOf(0)
+    // Relación real del cuadro que entrega la lente (alto / ancho en vertical).
+    var previewAspect by mutableFloatStateOf(0f)
     var zoom by mutableFloatStateOf(1f)
     var minZoom by mutableFloatStateOf(1f)
     var maxZoom by mutableFloatStateOf(1f)
@@ -363,6 +394,7 @@ private fun CameraUi.refreshLens() {
     // a la que el sensor tiene abierta de verdad, no a la primera de la lista.
     val active = lenses.indexOfFirst { it.id == session.cameraId }
     camera2Active = session.isCamera2Source
+    if (session.previewAspect > 0f) previewAspect = session.previewAspect
     lensIndex = if (active >= 0) active
     else lensIndex.coerceIn(0, (lenses.size - 1).coerceAtLeast(0))
     session.setMuted(muted)
@@ -833,20 +865,22 @@ private fun CameraScreen(
     ) {
         val landscape = maxWidth > maxHeight
 
-        // El visor dibuja el cuadro que viaja por NDI con su relación real: ocupa
-        // el ancho de la pantalla sin estirarlo.
-        val previewAspect = when {
-            landscape && camera.fullSensor -> 4f / 3f
-            landscape -> 16f / 9f
-            camera.fullSensor -> 3f / 4f
-            else -> 9f / 16f
+        // El visor cubre la pantalla con la relación real de la fuente: escala
+        // uniforme y recorte del sobrante, nunca deformación.
+        val sourceAspect = if (camera.previewAspect > 0f) {
+            if (landscape) 1f / camera.previewAspect else camera.previewAspect
+        } else if (camera.fullSensor) {
+            if (landscape) 4f / 3f else 3f / 4f
+        } else if (landscape) {
+            16f / 9f
+        } else {
+            9f / 16f
         }
         AndroidView(
             factory = { camera.surfaceView },
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(previewAspect)
-                .align(Alignment.Center)
+                .fillMaxSize()
+                .coverViewport(sourceAspect)
         )
         if (camera.grid) FramingGrid()
 
@@ -2613,7 +2647,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        if (!fullscreen && !clean) TopBar(
+        if (!fullscreen && !clean && !pipActive.value) TopBar(
             modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
             trailing = {
                 Text(
@@ -2654,7 +2688,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
                     } else {
                         Text("Sin señal", color = Color(0xFF6B7785))
                     }
-                    if (!clean) {
+                    if (!clean && !pipActive.value) {
                         Row(
                             Modifier
                                 .align(Alignment.TopStart)
@@ -2676,6 +2710,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             if (playing != null) {
+                                GlassChip("PiP", pipActive.value) { enterPip(activity) }
                                 GlassChip("Vista limpia", false) { clean = true }
                                 GlassChip(
                                     if (fullscreen) "Salir" else "Pantalla completa",
@@ -2914,7 +2949,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
                 }
             }
 
-            if (fullscreen || clean) {
+            if (fullscreen || clean || pipActive.value) {
                 viewer(Modifier.fillMaxSize())
             } else if (landscape) {
                 Row(Modifier.fillMaxSize()) {
@@ -2932,6 +2967,27 @@ private fun MonitorTab(onMenu: () -> Unit) {
 }
 
 // -------------------------------------------------------------- multimedia --
+
+/** Cubre el espacio disponible con [aspect] recortando el sobrante. */
+private fun Modifier.coverViewport(aspect: Float): Modifier = layout { measurable, constraints ->
+    val maxWidth = constraints.maxWidth
+    val maxHeight = constraints.maxHeight
+    if (aspect <= 0f || maxWidth <= 0 || maxHeight <= 0) {
+        val placeable = measurable.measure(constraints)
+        return@layout layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+    }
+    val coverWidth = maxOf(maxWidth.toFloat(), maxHeight * aspect)
+    val coverHeight = coverWidth / aspect
+    val placeable = measurable.measure(
+        Constraints.fixed(coverWidth.roundToInt(), coverHeight.roundToInt())
+    )
+    layout(maxWidth, maxHeight) {
+        placeable.place(
+            ((maxWidth - placeable.width) / 2f).roundToInt(),
+            ((maxHeight - placeable.height) / 2f).roundToInt()
+        )
+    }
+}
 
 /** Vista simple que dibuja el frame NDI escalado y centrado. */
 private class NdiVideoView(context: Context) : android.view.View(context) {
