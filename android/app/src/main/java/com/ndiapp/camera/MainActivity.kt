@@ -263,6 +263,8 @@ private class CameraUi(appContext: Context) {
     var facing by mutableIntStateOf(CameraSelector.LENS_FACING_BACK)
     var height by mutableIntStateOf(1080)
     var fps by mutableIntStateOf(30)
+    // Encuadre de la fuente NDI: 16:9 recorta el sensor, 4:3 usa el sensor completo.
+    var fullSensor by mutableStateOf(false)
     var withAudio by mutableStateOf(true)
     var muted by mutableStateOf(false)
     var grid by mutableStateOf(true)
@@ -586,6 +588,7 @@ private fun CameraUi.cameraRequest(): CameraRequest = CameraRequest(
     height = height,
     fps = fps,
     withAudio = withAudio,
+    fullSensor = fullSensor,
     ndiName = sessionNdiName()
 )
 
@@ -649,6 +652,13 @@ private fun CameraUi.selectLens(index: Int, lifecycleOwner: LifecycleOwner) {
 private fun CameraUi.cycleLens(lifecycleOwner: LifecycleOwner) {
     if (facing != CameraSelector.LENS_FACING_BACK || lenses.size < 2) return
     selectLens((lensIndex + 1) % lenses.size, lifecycleOwner)
+}
+
+/** Cambia el encuadre de la fuente: 16:9 recortado o 4:3 con el sensor completo. */
+private fun CameraUi.setFrame(fullSensor: Boolean, lifecycleOwner: LifecycleOwner) {
+    if (this.fullSensor == fullSensor) return
+    this.fullSensor = fullSensor
+    restart(lifecycleOwner)
 }
 
 /** Fija el aumento sobre la lente abierta (0,5× … máximo del sensor). */
@@ -896,6 +906,11 @@ private fun CameraScreen(
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
                 }
+                FrameBar(
+                    camera = camera,
+                    lifecycleOwner = lifecycleOwner,
+                    modifier = Modifier.padding(bottom = 5.dp)
+                )
                 ZoomBar(
                     camera = camera,
                     lifecycleOwner = lifecycleOwner,
@@ -1121,6 +1136,43 @@ private fun MenuButton(onClick: () -> Unit) {
                 val y = size.height * (0.22f + i * 0.28f)
                 drawLine(lineColor, Offset(0f, y), Offset(size.width, y), strokeWidth = stroke.width, cap = StrokeCap.Round)
             }
+        }
+    }
+}
+
+/** Encuadre de la fuente NDI: 16:9 (recorta el sensor) o 4:3 (sensor completo). */
+@Composable
+private fun FrameBar(
+    camera: CameraUi,
+    lifecycleOwner: LifecycleOwner,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier
+            .widthIn(max = 560.dp)
+            .fillMaxWidth()
+            .glassSurface(
+                shape = RoundedCornerShape(18.dp),
+                tint = Color.Black,
+                fillAlpha = 0.62f,
+                strokeAlpha = 0.32f,
+                elevation = 16
+            )
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("ENCUADRE", fontSize = 8.sp, color = NdiGlass.Muted)
+            Spacer(Modifier.width(7.dp))
+            ZoomChip("16:9", !camera.fullSensor) { camera.setFrame(false, lifecycleOwner) }
+            Spacer(Modifier.width(5.dp))
+            ZoomChip("4:3", camera.fullSensor) { camera.setFrame(true, lifecycleOwner) }
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (camera.fullSensor) "sensor completo" else "recortado",
+                fontSize = 8.sp,
+                color = NdiGlass.Muted,
+                maxLines = 1
+            )
         }
     }
 }
