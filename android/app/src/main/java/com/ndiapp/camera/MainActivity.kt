@@ -114,8 +114,10 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -352,8 +354,9 @@ private class CameraUi(appContext: Context) {
     var fps by mutableIntStateOf(30)
     // Encuadre de la fuente NDI: 16:9 recorta el sensor, 4:3 usa el sensor completo.
     var fullSensor by mutableStateOf(false)
-    // La barra de zoom se puede ocultar para dejar el visor despejado.
-    var zoomShown by mutableStateOf(true)
+    // La barra de zoom arranca cerrada: el visor queda despejado y la barra
+    // sólo aparece cuando se pide desde el dock.
+    var zoomShown by mutableStateOf(false)
     var withAudio by mutableStateOf(true)
     var muted by mutableStateOf(false)
     var grid by mutableStateOf(true)
@@ -372,8 +375,8 @@ private class CameraUi(appContext: Context) {
     var exposureRange by mutableStateOf(0..0)
     var version by mutableStateOf("")
 
-    // Controles pro: tira de parámetros con regla de precisión
-    var proOpen by mutableStateOf(true)
+    // Controles pro: arrancan cerrados para no tapar el visor.
+    var proOpen by mutableStateOf(false)
     var proParam by mutableStateOf(ProParam.EV)
 
     // ISO y obturación se manejan por separado, como en la cámara del sistema:
@@ -866,8 +869,12 @@ private fun CameraScreen(
     ) { granted = hasCameraPermissions(context) }
     var chrome by remember { mutableStateOf(true) }
     var focusRing by remember { mutableStateOf<Offset?>(null) }
-    // Alto real de las barras de abajo: el cuadro se encaja por encima de ellas.
-    var bottomBars by remember { mutableIntStateOf(0) }
+    // El visor se encaja por encima del dock: se mide la distancia desde el
+    // borde inferior de la pantalla hasta el dock, no el alto de las barras, así
+    // el cuadro conserva su tamaño cuando se abren o cierran.
+    var dockTop by remember { mutableFloatStateOf(0f) }
+    var columnBottom by remember { mutableFloatStateOf(0f) }
+    val bottomBars = (columnBottom - dockTop).roundToInt().coerceAtLeast(0)
     val density = LocalDensity.current
 
     LaunchedEffect(focusRing) {
@@ -880,6 +887,13 @@ private fun CameraScreen(
     LaunchedEffect(Unit) {
         if (!granted) launcher.launch(requiredPermissions)
         camera.version = runCatching { NdiNative.sdkVersion() }.getOrDefault("")
+    }
+
+    // La actividad no se recrea al girar (configChanges): se avisa a la cámara
+    // para que los cuadros salgan derechos con la orientación nueva.
+    val configuration = LocalConfiguration.current
+    LaunchedEffect(configuration.orientation) {
+        camera.session.onDisplayRotated()
     }
 
     // La cámara se abre al entrar en el visor y sigue viéndose sin emitir.
@@ -947,9 +961,9 @@ private fun CameraScreen(
         val landscape = maxWidth > maxHeight
 
         // El visor dibuja los mismos cuadros que van a NDI con su proporción:
-        // franjas negras si sobra espacio, nunca deformación. Con los controles
-        // visibles se reserva el alto de las barras de abajo, así el cuadro sube
-        // y la barra pro y la de zoom no lo tapan.
+        // franjas negras si sobra espacio, nunca deformación. Abajo se reserva
+        // siempre el alto del dock y no el de las barras: el cuadro no cambia de
+        // tamaño al abrir o cerrar la barra de zoom o la tira pro.
         AndroidView(
             factory = { camera.cameraView },
             modifier = Modifier
@@ -1050,7 +1064,9 @@ private fun CameraScreen(
                     .align(Alignment.BottomCenter)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
                     .padding(horizontal = 10.dp, vertical = 10.dp)
-                    .onGloballyPositioned { position -> bottomBars = position.size.height },
+                    .onGloballyPositioned { position ->
+                        columnBottom = position.boundsInRoot().bottom
+                    },
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 camera.recordNotice?.let { message ->
@@ -1074,6 +1090,9 @@ private fun CameraScreen(
                     )
                 }
             ControlDock(
+                modifier = Modifier.onGloballyPositioned { position ->
+                    dockTop = position.boundsInRoot().top
+                },
                 streaming = camera.running,
                 recording = camera.recording,
                 grid = camera.grid,

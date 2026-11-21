@@ -11,6 +11,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.hardware.display.DisplayManager
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder
@@ -84,6 +85,15 @@ class Camera2LensSource(private val context: Context) {
     var previewAspect: Float = 0f
         private set
 
+    /**
+     * Grados que hay que girar el cuadro del sensor para que salga derecho con la
+     * pantalla como está ahora. La actividad no se recrea al girar, así que se
+     * recalcula con el aviso del DisplayManager y no sólo al abrir la cámara.
+     */
+    @Volatile
+    var frameRotation: Int = 0
+        private set
+
     val isRecording: Boolean
         get() = recorder != null
 
@@ -91,6 +101,16 @@ class Camera2LensSource(private val context: Context) {
     private val callbackExecutor = Executor { command -> mainHandler.post(command) }
     private val frameThread = HandlerThread("camera2-lens").apply { start() }
     private val frameHandler = Handler(frameThread.looper)
+    private val displayManager by lazy {
+        context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    }
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            updateFrameRotation()
+        }
+    }
 
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
@@ -103,6 +123,7 @@ class Camera2LensSource(private val context: Context) {
     private var targetFps: Range<Int> = Range(30, 30)
     private var pendingAnalysisSize: Size? = null
     private var sensorOrientation: Int = 90
+    private var frontFacing = false
     private var activeArray: Rect? = null
 
     private var zoomRatio = 1f
@@ -168,6 +189,11 @@ class Camera2LensSource(private val context: Context) {
             characteristics = runCatching { manager.getCameraCharacteristics(cameraId) }.getOrNull()
         }
         readRanges(characteristics)
+        updateFrameRotation()
+        runCatching {
+            displayManager.unregisterDisplayListener(displayListener)
+            displayManager.registerDisplayListener(displayListener, mainHandler)
+        }
         val map = characteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         pendingAnalysisSize = chooseSize(map?.getOutputSizes(ImageFormat.YUV_420_888), height, fullSensor)
         previewSize = chooseSize(map?.getOutputSizes(SurfaceHolder::class.java), height, fullSensor)
@@ -503,23 +529,42 @@ class Camera2LensSource(private val context: Context) {
     }
 
     /** Grados que hay que girar el cuadro del sensor para que salga derecho. */
-    private fun videoRotation(): Int {
+    private fun videoRotation(): Int = frameRotation
+
+    /** Vuelve a leer la orientación de la pantalla (al girar o al abrir). */
+    fun refreshRotation() {
+        updateFrameRotation()
+    }
+
+    private fun updateFrameRotation() {
+        val degrees = displayDegrees()
+        // Delantera y trasera giran al revés: la trasera resta el giro de la
+        // pantalla y la delantera lo suma, como en la cámara del sistema.
+        frameRotation = if (frontFacing) {
+            (sensorOrientation + degrees) % 360
+        } else {
+            (sensorOrientation - degrees + 360) % 360
+        }
+    }
+
+    /** Rotación de la pantalla en grados (0, 90, 180 o 270). */
+    private fun displayDegrees(): Int {
         val displayRotation = runCatching {
             val manager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             @Suppress("DEPRECATION")
             manager.defaultDisplay.rotation
         }.getOrDefault(Surface.ROTATION_0)
-        val degrees = when (displayRotation) {
+        return when (displayRotation) {
             Surface.ROTATION_90 -> 90
             Surface.ROTATION_180 -> 180
             Surface.ROTATION_270 -> 270
             else -> 0
         }
-        return (sensorOrientation - degrees + 360) % 360
     }
 
     fun close() {
         closed = true
+        runCatching { displayManager.unregisterDisplayListener(displayListener) }
         runCatching { session?.stopRepeating() }
         runCatching { session?.close() }
         runCatching { device?.close() }
@@ -565,6 +610,8 @@ class Camera2LensSource(private val context: Context) {
         hasFlash = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
         sensorOrientation =
             characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        frontFacing = characteristics.get(CameraCharacteristics.LENS_FACING) ==
+            CameraCharacteristics.LENS_FACING_FRONT
         activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         val max = characteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
         minZoom = 1f

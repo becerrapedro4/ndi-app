@@ -208,6 +208,13 @@ class CameraSession(private val context: Context) {
         surfaceView = view
     }
 
+    /** La pantalla giró sin recrear la actividad: se reorientan los cuadros. */
+    fun onDisplayRotated() {
+        camera2Source?.refreshRotation()
+        val rotation = previewView?.display?.rotation ?: return
+        runCatching { analysis?.targetRotation = rotation }
+    }
+
     /** Abre la cámara y mantiene la vista previa, todavía sin emitir por NDI. */
     fun start(previewView: PreviewView, owner: LifecycleOwner, req: CameraRequest) {
         request = req
@@ -505,8 +512,9 @@ class CameraSession(private val context: Context) {
                     )
                 )
             }
-            // El sensor entrega apaisado; en vertical hay que girar 90 grados.
-            val rotation = if (width > height) 90 else 0
+            // El sensor entrega apaisado: se gira según cómo esté la pantalla,
+            // así en landscape el cuadro sale derecho en vez de acostado.
+            val rotation = camera2Source?.frameRotation ?: 0
             val dims = Yuv.toRgba(
                 width, height, rotation,
                 y.buffer, y.rowStride, y.pixelStride,
