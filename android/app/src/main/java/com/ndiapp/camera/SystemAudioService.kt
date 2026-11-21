@@ -122,7 +122,7 @@ class SystemAudioService : Service() {
                 audio.onSystemDetail = { message -> detail.value = message }
                 source = audio
                 val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    audio.startSystemAudio(created, "NDI App Audio sistema (${Build.MODEL})")
+                    audio.startSystemAudio(created, "NDI App Audio sistema")
                 } else {
                     status.value = "El audio del sistema requiere Android 10 o superior"
                     false

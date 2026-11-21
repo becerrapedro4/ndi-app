@@ -75,13 +75,17 @@ class SystemAudioCapture(
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                 .addMatchingUsage(AudioAttributes.USAGE_GAME)
                 .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .addMatchingUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                .addMatchingUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
                 .build()
         } catch (t: Throwable) {
             Log.w(TAG, "No se pudo configurar la captura de reproducción", t)
             fail(
                 if (t is SecurityException) {
                     "Android denegó la captura de reproducción: falta el permiso de micrófono " +
-                        "(RECORD_AUDIO) o la proyección ya no es válida"
+                        "(RECORD_AUDIO en Android 14+) o la proyección ya no es válida" +
+                        "\n\nPara solucionar: 1) Conceder el permiso RECORD_AUDIO en configuración\n" +
+                        "2) Detener y volver a iniciar el servicio NDI App Audio"
                 } else {
                     "No se pudo configurar la captura de reproducción (${t.javaClass.simpleName})"
                 }

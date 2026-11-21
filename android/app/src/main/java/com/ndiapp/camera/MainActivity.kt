@@ -834,7 +834,7 @@ private fun CameraUi.restart(lifecycleOwner: LifecycleOwner) {
     }, 280)
 }
 
-private fun sessionNdiName(): String = "NDI App (${Build.MODEL})"
+private fun sessionNdiName(): String = "NDI App"
 
 // ---------------------------------------------------------------- cámara ----
 
@@ -2753,7 +2753,7 @@ private fun ScreenTab(onMenu: () -> Unit) {
                     color = NdiGlass.Muted
                 )
                 Text(
-                    "La fuente aparece como «NDI App Pantalla (${Build.MODEL})».",
+                    "La fuente aparece como «NDI App Pantalla».",
                     style = MaterialTheme.typography.bodySmall,
                     color = NdiGlass.Muted
                 )
@@ -3491,7 +3491,7 @@ private fun AudioTab(onMenu: () -> Unit) {
                 status = "Este dispositivo no permite capturar audio del sistema"
             }
         } else if (target == 0) {
-            running = source.startMicrophone("NDI App Audio (${Build.MODEL})")
+            running = source.startMicrophone("NDI App Audio")
             if (!running) status = "No se pudo iniciar la fuente de audio"
         }
     }
@@ -3608,7 +3608,7 @@ private fun AudioTab(onMenu: () -> Unit) {
                                     status = "Concede el micrófono para enviar audio"
                                     audioPermission.launch(Manifest.permission.RECORD_AUDIO)
                                 } else {
-                                    val name = "NDI App Audio (${Build.MODEL})"
+                                    val name = "NDI App Audio"
                                     running = if (mode == 0) {
                                         source.startMicrophone(name)
                                     } else {
@@ -3743,7 +3743,7 @@ private fun MediaTab(onMenu: () -> Unit) {
         playlist = playlist + added
         bindPlayer()
         val from = if (current >= 0) current else 0
-        sending = player.start(playlist, "NDI App Multimedia (${Build.MODEL})", from)
+        sending = player.start(playlist, "NDI App Multimedia", from)
         player.setExtraRotation(rotation)
         if (!sending) status = "No se pudo iniciar la fuente NDI"
     }
@@ -3826,7 +3826,7 @@ private fun MediaTab(onMenu: () -> Unit) {
                             bindPlayer()
                             sending = player.start(
                                 playlist,
-                                "NDI App Multimedia (${Build.MODEL})",
+                                "NDI App Multimedia",
                                 if (current >= 0) current else 0
                             )
                             player.setExtraRotation(rotation)
@@ -3914,7 +3914,7 @@ private fun MediaTab(onMenu: () -> Unit) {
                                         bindPlayer()
                                         sending = player.start(
                                             playlist,
-                                            "NDI App Multimedia (${Build.MODEL})",
+                                            "NDI App Multimedia",
                                             index
                                         )
                                         player.setExtraRotation(rotation)

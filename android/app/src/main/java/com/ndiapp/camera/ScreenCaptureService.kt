@@ -116,7 +116,7 @@ class ScreenCaptureService : Service() {
             stopSelf()
             return
         }
-        val created = NdiSender("NDI App Pantalla (${Build.MODEL})")
+        val created = NdiSender("NDI App Pantalla")
         if (!created.isValid) {
             stopSelf()
             return

@@ -59,7 +59,7 @@ class AudioNdiSource(private val context: Context) {
             }
             onSystemDetail?.invoke(
                 if (buffers == 0L) {
-                    "Muestras recibidas: 0 · ${capture.formatLabel}"
+                    "Muestras recibidas: 0 · ${capture.formatLabel}\n\nSi la captura está activa pero no hay sonido: deja sonando algo en Spotify u otra app, y si sigue así, detén y vuelve a iniciar la captura en la app."
                 } else {
                     "Muestras: $buffers · nivel $db dBFS · ${capture.formatLabel}"
                 }
