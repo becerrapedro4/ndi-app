@@ -115,6 +115,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -865,6 +866,9 @@ private fun CameraScreen(
     ) { granted = hasCameraPermissions(context) }
     var chrome by remember { mutableStateOf(true) }
     var focusRing by remember { mutableStateOf<Offset?>(null) }
+    // Alto real de las barras de abajo: el cuadro se encaja por encima de ellas.
+    var bottomBars by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
 
     LaunchedEffect(focusRing) {
         if (focusRing != null) {
@@ -943,10 +947,20 @@ private fun CameraScreen(
         val landscape = maxWidth > maxHeight
 
         // El visor dibuja los mismos cuadros que van a NDI con su proporción:
-        // franjas negras si sobra espacio, nunca deformación.
+        // franjas negras si sobra espacio, nunca deformación. Con los controles
+        // visibles se reserva el alto de las barras de abajo, así el cuadro sube
+        // y la barra pro y la de zoom no lo tapan.
         AndroidView(
             factory = { camera.cameraView },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    bottom = if (chrome && bottomBars > 0) {
+                        with(density) { bottomBars.toDp() }
+                    } else {
+                        0.dp
+                    }
+                )
         )
         if (camera.grid) FramingGrid()
 
@@ -1035,7 +1049,8 @@ private fun CameraScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                    .padding(horizontal = 10.dp, vertical = 10.dp)
+                    .onGloballyPositioned { position -> bottomBars = position.size.height },
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 camera.recordNotice?.let { message ->
@@ -3347,28 +3362,15 @@ private fun Modifier.fitViewport(aspect: Float): Modifier = layout { measurable,
 /**
  * Dibuja un cuadro de cámara en RGBA encajado en el espacio disponible.
  *
- * El búfer llega en orden RGBA y el mapa de bits se interpreta como ARGB, así que
- * se intercambian rojo y azul al pintar; el escalado es uniforme (min) para que la
- * imagen nunca se deforme.
+ * El búfer llega en orden RGBA, que es como Android guarda ARGB_8888 en memoria,
+ * así que se pinta tal cual: sin invertir canales, con los mismos colores que
+ * viajan por NDI. El escalado es uniforme (min) para que la imagen no se deforme.
  */
 private class CameraPreviewView(context: Context) : android.view.View(context) {
 
     private var bitmap: Bitmap? = null
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val target = Rect()
-
-    init {
-        val swap = android.graphics.ColorMatrix()
-        swap.set(
-            floatArrayOf(
-                0f, 0f, 1f, 0f, 0f,
-                0f, 1f, 0f, 0f, 0f,
-                1f, 0f, 0f, 0f, 0f,
-                0f, 0f, 0f, 1f, 0f
-            )
-        )
-        paint.colorFilter = android.graphics.ColorMatrixColorFilter(swap)
-    }
 
     fun setFrame(frame: Bitmap) {
         bitmap = frame
