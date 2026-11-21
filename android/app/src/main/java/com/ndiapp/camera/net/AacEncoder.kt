@@ -71,7 +71,7 @@ class AacEncoder(
             // El codificador puede tardar en soltar buffers: se vacía antes de
             // pedir entrada para no atascar la cola de salida.
             drain()
-            val input = codec.dequeueInputBuffer(0)
+            val input = codec.dequeueInputBuffer(10_000)
             if (input < 0) {
                 Log.w(TAG, "Sin búfer de entrada: bloque de audio descartado")
                 return

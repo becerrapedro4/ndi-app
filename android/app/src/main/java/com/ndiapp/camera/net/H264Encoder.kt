@@ -78,14 +78,26 @@ class H264Encoder(
         if (!isRunning) return
         try {
             if (semiPlanar) buildNv12(frame) else buildI420(frame)
-            val index = codec.dequeueInputBuffer(0)
+            // Un poco de espera: con 0 ms el codificador descartaba cuadros
+            // mientras terminaba de arrancar y la salida quedaba en 0 fps.
+            val index = codec.dequeueInputBuffer(10_000)
             if (index < 0) return
             if (semiPlanar) {
-                val buffer = codec.getInputBuffer(index) ?: return
+                val buffer = codec.getInputBuffer(index)
+                if (buffer == null) {
+                    // Nunca se abandona el índice: se devuelve vacío y el
+                    // codificador sigue aceptando cuadros.
+                    codec.queueInputBuffer(index, 0, 0, frame.timestampNs / 1000, 0)
+                    return
+                }
                 buffer.clear()
                 buffer.put(nv12, 0, frameSize)
             } else {
-                val image = codec.getInputImage(index) ?: return
+                val image = codec.getInputImage(index)
+                if (image == null) {
+                    codec.queueInputBuffer(index, 0, 0, frame.timestampNs / 1000, 0)
+                    return
+                }
                 fillImage(image)
             }
             codec.queueInputBuffer(index, 0, frameSize, frame.timestampNs / 1000, 0)

@@ -17,9 +17,13 @@ object SrtNative {
 
     val available: Boolean get() = loaded
 
-    /** Abre un srt:// (llamante o escucha, según ?mode=) y devuelve el socket. */
-    fun connect(url: String, timeoutMs: Int = 8000): Long =
-        if (loaded) nativeConnect(url, timeoutMs) else 0L
+    /**
+     * Abre un srt:// (llamante o escucha, según ?mode=) y devuelve el socket.
+     * [sender] marca el socket como emisor: el modo escucha que emite lo
+     * necesita para que el receptor no invierta el reloj.
+     */
+    fun connect(url: String, timeoutMs: Int = 8000, sender: Boolean = false): Long =
+        if (loaded) nativeConnect(url, timeoutMs, sender) else 0L
 
     /** Bloquea hasta recibir datos. Devuelve bytes, 0 sin datos o -1 con error. */
     fun read(handle: Long, buffer: ByteArray, offset: Int, length: Int): Int =
@@ -40,7 +44,7 @@ object SrtNative {
 
     fun lastError(): String = if (loaded) nativeLastError() else "libsrt no disponible"
 
-    private external fun nativeConnect(url: String, timeoutMs: Int): Long
+    private external fun nativeConnect(url: String, timeoutMs: Int, sender: Boolean): Long
     private external fun nativeRead(handle: Long, buffer: ByteArray, offset: Int, length: Int): Int
     private external fun nativeWrite(handle: Long, buffer: ByteArray, offset: Int, length: Int): Int
     private external fun nativeClose(handle: Long)

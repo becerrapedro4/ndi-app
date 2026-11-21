@@ -113,7 +113,7 @@ bool resolve(const std::string &host, int port, sockaddr_storage &storage, sockl
     return true;
 }
 
-SRTSOCKET openSocket(const std::string &url, int timeoutMs) {
+SRTSOCKET openSocket(const std::string &url, int timeoutMs, bool sender) {
     ensureStarted();
     SrtUrl parsed;
     if (!parseUrl(url, parsed)) return SRT_INVALID_SOCK;
@@ -131,6 +131,13 @@ SRTSOCKET openSocket(const std::string &url, int timeoutMs) {
     srt_setsockflag(socket, SRTO_TRANSTYPE, &type, sizeof(type));
     srt_setsockflag(socket, SRTO_RCVLATENCY, &latency, sizeof(latency));
     srt_setsockflag(socket, SRTO_PEERLATENCY, &latency, sizeof(latency));
+    // SRTO_TRANSTYPE reinicia las opciones del socket, así que la marca de
+    // emisor va después. Sin ella, un socket que emite desde el lado escucha
+    // no se anuncia como emisor y el receptor aplica el reloj al revés.
+    if (sender) {
+        const int yes = 1;
+        srt_setsockflag(socket, SRTO_SENDER, &yes, sizeof(yes));
+    }
     if (!parsed.streamId.empty()) {
         srt_setsockflag(socket, SRTO_STREAMID, parsed.streamId.c_str(),
                         static_cast<int>(parsed.streamId.size()));
@@ -225,14 +232,15 @@ void clearPending(SRTSOCKET socket) {
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_ndiapp_camera_net_SrtNative_nativeConnect(JNIEnv *env, jobject, jstring url, jint timeoutMs) {
+Java_com_ndiapp_camera_net_SrtNative_nativeConnect(JNIEnv *env, jobject, jstring url, jint timeoutMs,
+                                                   jboolean sender) {
     if (url == nullptr) return 0;
     const char *chars = env->GetStringUTFChars(url, nullptr);
     std::string address(chars == nullptr ? "" : chars);
     if (chars != nullptr) env->ReleaseStringUTFChars(url, chars);
     gCancelled.store(false);
     clearPending(SRT_INVALID_SOCK);
-    const SRTSOCKET socket = openSocket(address, timeoutMs);
+    const SRTSOCKET socket = openSocket(address, timeoutMs, sender == JNI_TRUE);
     if (socket == SRT_INVALID_SOCK) {
         LOGE("SRT no pudo conectar a %s: %s", address.c_str(), gLastError.c_str());
         return 0;
@@ -324,7 +332,6 @@ Java_com_ndiapp_camera_net_SrtNative_nativeWrite(JNIEnv *env, jobject, jlong han
     std::memset(&mctrl, 0, sizeof(mctrl));
     srt_msgctrl_init(&mctrl);
     mctrl.msgttl = SRT_MSGTTL_INF;
-    mctrl.inorder = 1;
     while (written < length) {
         int chunk = length - written;
         if (chunk > 1316) chunk = 1316;

@@ -75,6 +75,12 @@ class SrtTransmitter {
     private var ptsBase = -1L
     private var lastPts = 0L
 
+    // El audio y el vídeo tienen que medirse con el mismo reloj: el sensor
+    // entrega tiempos de arranque del equipo (incluyen el sueño), así que el
+    // audio se ancla al primer cuadro con el reloj monótono del sistema.
+    @Volatile
+    private var realtimeBaseUs = -1L
+
     fun start(url: String, fps: Int) {
         if (running) return
         if (!SrtNative.available) {
@@ -88,6 +94,7 @@ class SrtTransmitter {
         frames = 0
         ptsBase = -1L
         lastPts = 0L
+        realtimeBaseUs = -1L
         connected = false
         releaseEncoder()
         releaseAac()
@@ -195,10 +202,20 @@ class SrtTransmitter {
         return created
     }
 
-    /** Primer PTS del audio en la misma base que el vídeo, sin el búfer leído. */
+    /**
+     * Primer PTS del audio en la misma base temporal que el vídeo. Se usa el
+     * reloj monótono del sistema, que es el mismo con el que se ancló el primer
+     * cuadro: mezclar el reloj del sensor con System.nanoTime() dejaba al audio
+     * horas adelante o atrás y el receptor no arrancaba el programa.
+     */
     private fun audioStartUs(leadUs: Long): Long {
-        val base = if (ptsBase >= 0L) ptsBase else System.nanoTime() / 1000L
-        return (System.nanoTime() / 1000L - base) - leadUs
+        val now = SystemClock.elapsedRealtimeNanos() / 1000L
+        var base = realtimeBaseUs
+        if (base < 0L) {
+            base = now
+            realtimeBaseUs = now
+        }
+        return ((now - base) - leadUs).coerceAtLeast(0L)
     }
 
     @Synchronized
@@ -212,7 +229,10 @@ class SrtTransmitter {
 
     /** PTS en unidades de 90 kHz, relativo al primer cuadro y sin retrocesos. */
     private fun presentationTime(ptsUs: Long): Long {
-        if (ptsBase < 0L) ptsBase = ptsUs
+        if (ptsBase < 0L) {
+            ptsBase = ptsUs
+            realtimeBaseUs = SystemClock.elapsedRealtimeNanos() / 1000L
+        }
         var pts = ptsUs - ptsBase
         if (pts < lastPts) pts = lastPts + 33_000L
         lastPts = pts
@@ -232,7 +252,7 @@ class SrtTransmitter {
             finish(gen, "SRT: falta la URL de salida")
             return
         }
-        val socket = SrtNative.connect(url, 8000)
+        val socket = SrtNative.connect(url, 8000, sender = true)
         if (socket == 0L) {
             finish(gen, "SRT: ${SrtNative.lastError()}")
             return
@@ -241,10 +261,15 @@ class SrtTransmitter {
             SrtNative.close(socket)
             return
         }
-        connected = true
+        // Lo codificado antes de conectar es imagen vieja: se descarta, y el
+        // receptor recibe el PAT/PMT antes que el primer cuadro.
         queue.clear()
+        connected = true
+        queue.offer(muxer.psi())
         onStatus?.invoke("SRT transmitiendo")
-        var windowStart = SystemClock.elapsedRealtime()
+        val connectedAt = SystemClock.elapsedRealtime()
+        var noImageWarned = false
+        var windowStart = connectedAt
         var windowBytes = 0L
         var windowFrames = frames
         try {
@@ -268,6 +293,14 @@ class SrtTransmitter {
                         val rate = ((counted - windowFrames) * 1000f / elapsed).toInt()
                         onProgress?.invoke(mbps, rate)
                         windowFrames = counted
+                        if (!noImageWarned && counted == 0 && now - connectedAt >= 3000) {
+                            // Conectado y sin un solo cuadro codificado: se dice,
+                            // en vez de dejar la salida en 0 fps sin explicación.
+                            noImageWarned = true
+                            onWarning?.invoke(
+                                "SRT conectado, pero la cámara no entrega imagen al codificador"
+                            )
+                        }
                     }
                     windowBytes = 0L
                     windowStart = now
