@@ -9,6 +9,9 @@ class UvcNdiSource(private val context: Context) {
 
     var onStatus: ((String) -> Unit)? = null
 
+    /** Copia de cada cuadro capturado, para la vista previa de la app. */
+    var onPreview: ((rgba: ByteArray, width: Int, height: Int) -> Unit)? = null
+
     private var sender: NdiSender? = null
     private var streamer: UvcStreamer? = null
 
@@ -29,7 +32,10 @@ class UvcNdiSource(private val context: Context) {
         val capture = UvcStreamer(
             context = context,
             camera = camera,
-            onFrame = { rgba, width, height, fps -> created.sendVideo(rgba, width, height, fps) },
+            onFrame = { rgba, width, height, fps ->
+                created.sendVideo(rgba, width, height, fps)
+                onPreview?.invoke(rgba, width, height)
+            },
             onStatus = { message -> onStatus?.invoke(message) }
         )
         if (!capture.start()) {

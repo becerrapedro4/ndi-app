@@ -24,6 +24,7 @@ import android.view.SurfaceView
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -33,6 +34,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -104,11 +106,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -3974,11 +3979,19 @@ private fun UvcTab(onMenu: () -> Unit) {
     var cameras by remember { mutableStateOf(emptyList<UvcCamera>()) }
     var active by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Conecta una cámara USB al teléfono") }
+    val preview = remember { UvcPreview() }
 
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(receiverContext: Context?, intent: Intent?) {
                 cameras = UvcCameras.list(context)
+                val running = active
+                if (running != null && cameras.none { it.deviceName == running }) {
+                    source.stop()
+                    active = null
+                    preview.clear()
+                    status = "La cámara se desconectó"
+                }
             }
         }
         val filter = IntentFilter().apply {
@@ -3991,11 +4004,25 @@ private fun UvcTab(onMenu: () -> Unit) {
         } else {
             context.registerReceiver(receiver, filter)
         }
+        source.onPreview = { rgba, width, height -> preview.submit(rgba, width, height) }
         cameras = UvcCameras.list(context)
         onDispose {
             runCatching { context.unregisterReceiver(receiver) }
+            source.onPreview = null
+            preview.clear()
             source.stop()
         }
+    }
+
+    // Con una sola cámara ya autorizada, la sección la abre sola: el monitor muestra
+    // imagen y la fuente NDI queda al aire sin pasos extra.
+    LaunchedEffect(cameras) {
+        val only = cameras.singleOrNull() ?: return@LaunchedEffect
+        if (active != null || !only.hasPermission) return@LaunchedEffect
+        source.onStatus = { status = it }
+        val started = source.start(only, "NDI App UVC (${only.product})")
+        active = if (started) only.deviceName else null
+        if (!started) preview.clear()
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -4019,6 +4046,47 @@ private fun UvcTab(onMenu: () -> Unit) {
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            GlassPanel {
+                Text(
+                    "Monitor de vista previa",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = NdiGlass.Text
+                )
+                Text(
+                    "El cuadro completo de la cámara USB, con su proporción y franjas negras " +
+                        "si sobra espacio. Se activa al pulsar Emitir.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NdiGlass.Muted
+                )
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(preview.aspect.coerceIn(0.4f, 3f))
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.Black),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val frame = preview.image
+                    if (frame == null) {
+                        Text(
+                            if (active != null) {
+                                "Esperando imagen de la cámara…"
+                            } else {
+                                "Sin vista previa"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NdiGlass.Muted
+                        )
+                    } else {
+                        Image(
+                            bitmap = frame,
+                            contentDescription = "Vista previa de la cámara USB",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                }
+            }
             GlassPanel {
                 Text(
                     "Cámaras USB (UVC)",
@@ -4079,6 +4147,7 @@ private fun UvcTab(onMenu: () -> Unit) {
                             if (active == camera.deviceName) {
                                 source.stop()
                                 active = null
+                                preview.clear()
                                 status = "Cámara detenida"
                             } else if (!camera.hasPermission) {
                                 UvcCameras.requestPermission(context, camera, usbAction)
@@ -4090,6 +4159,7 @@ private fun UvcTab(onMenu: () -> Unit) {
                                     "NDI App UVC (${camera.product})"
                                 )
                                 active = if (started) camera.deviceName else null
+                                if (!started) preview.clear()
                                 if (!started && status.isEmpty()) {
                                     status = "No se pudo emitir la cámara"
                                 }
@@ -4100,6 +4170,69 @@ private fun UvcTab(onMenu: () -> Unit) {
                 StatusPill(running = active != null, text = status)
             }
         }
+    }
+}
+
+/**
+ * Monitor de vista previa de la cámara USB. Reduce cada cuadro a 640 px de ancho y
+ * lo publica a 12 fps, así el hilo de captura no espera a la interfaz ni al dibujo.
+ */
+private class UvcPreview {
+
+    var image by mutableStateOf<ImageBitmap?>(null)
+        private set
+    var aspect by mutableFloatStateOf(16f / 9f)
+        private set
+
+    private val main = Handler(Looper.getMainLooper())
+    private var lastAt = 0L
+    private var busy = false
+
+    fun submit(rgba: ByteArray, width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        val now = SystemClock.uptimeMillis()
+        if (busy || now - lastAt < PREVIEW_GAP_MS) return
+        lastAt = now
+        busy = true
+
+        val scale = (PREVIEW_WIDTH / width.toFloat()).coerceAtMost(1f)
+        val targetWidth = (width * scale).toInt().coerceAtLeast(2)
+        val targetHeight = (height * scale).toInt().coerceAtLeast(2)
+        val pixels = IntArray(targetWidth * targetHeight)
+        for (y in 0 until targetHeight) {
+            val sourceRow = (y * height / targetHeight) * width
+            for (x in 0 until targetWidth) {
+                val index = (sourceRow + x * width / targetWidth) * 4
+                if (index + 3 >= rgba.size) continue
+                val r = rgba[index].toInt() and 0xFF
+                val g = rgba[index + 1].toInt() and 0xFF
+                val b = rgba[index + 2].toInt() and 0xFF
+                pixels[y * targetWidth + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        val bitmap = runCatching {
+            Bitmap.createBitmap(pixels, targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        }.getOrNull()
+        val frameAspect = width.toFloat() / height
+
+        main.post {
+            busy = false
+            if (bitmap != null) {
+                image = bitmap.asImageBitmap()
+                aspect = frameAspect
+            }
+        }
+    }
+
+    fun clear() {
+        image = null
+        busy = false
+        lastAt = 0L
+    }
+
+    private companion object {
+        const val PREVIEW_WIDTH = 640f
+        const val PREVIEW_GAP_MS = 80L
     }
 }
 
