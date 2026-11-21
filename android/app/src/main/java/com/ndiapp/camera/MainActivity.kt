@@ -2820,7 +2820,10 @@ private fun MonitorTab(onMenu: () -> Unit) {
     val rxUrl = if (rxMode == "srt") srtUrl else rtspUrl
     var player by remember { mutableStateOf<ExoPlayer?>(null) }
     var rtspError by remember { mutableStateOf<String?>(null) }
+    var streamReady by remember { mutableStateOf(false) }
     val openSource: (NdiSource) -> Unit = { chosen ->
+        // Si quedaba una escucha SRT esperando al emisor, se corta.
+        SrtNative.cancel()
         player?.release()
         player = null
         rtspError = null
@@ -2842,8 +2845,11 @@ private fun MonitorTab(onMenu: () -> Unit) {
     val playStream: (String) -> Unit = { raw ->
         val address = raw.trim()
         if (address.isNotEmpty()) {
+            // La escucha SRT anterior puede estar bloqueada esperando al emisor.
+            SrtNative.cancel()
             player?.release()
             rtspError = null
+            streamReady = false
             playing = null
             frame = null
             receiver.stop()
@@ -2862,7 +2868,18 @@ private fun MonitorTab(onMenu: () -> Unit) {
             built.playWhenReady = true
             built.addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
-                    rtspError = error.errorCodeName
+                    // El código de ExoPlayer no dice nada: el motivo real de SRT
+                    // (puerto ocupado, emisor ausente, flujo inválido) va en la causa.
+                    val detail = error.cause?.message?.trim()?.take(140)
+                    rtspError = if (detail.isNullOrEmpty()) {
+                        error.errorCodeName
+                    } else {
+                        "${error.errorCodeName}: $detail"
+                    }
+                }
+
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_READY) streamReady = true
                 }
             })
             built.prepare()
@@ -2876,9 +2893,11 @@ private fun MonitorTab(onMenu: () -> Unit) {
         player?.volume = if (monitorMuted.value) 0f else 1f
     }
     val stopRtsp: () -> Unit = {
+        SrtNative.cancel()
         player?.release()
         player = null
         rtspError = null
+        streamReady = false
     }
 
     // Pantalla completa y vista limpia ocultan cabecera, lista y barras del sistema.
@@ -2916,6 +2935,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
     DisposableEffect(Unit) {
         onDispose {
             receiver.stop()
+            SrtNative.cancel()
             player?.release()
             finder.close()
         }
@@ -3115,7 +3135,9 @@ private fun MonitorTab(onMenu: () -> Unit) {
                         }
                         Text(
                             rtspError?.let { if (rxMode == "srt") "SRT: $it" else "RTSP: $it" }
-                                ?: if (rxMode == "srt") {
+                                ?: if (rxMode == "srt" && player != null && !streamReady) {
+                                    "Esperando al emisor SRT en ese puerto…"
+                                } else if (rxMode == "srt") {
                                     "Pegá una URL srt:// (MPEG-TS) y tocá Ver."
                                 } else {
                                     "Pegá una URL rtsp:// y tocá Ver."

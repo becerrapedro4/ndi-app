@@ -36,8 +36,8 @@ class SrtDataSource : BaseDataSource(true) {
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        // La lectura es bloqueante; un 0 sólo aparece en un timeout puntual.
-        var attempts = 0
+        // La lectura espera en tramos cortos: un 0 sólo significa que todavía no
+        // llegaron datos, así que se sigue esperando al emisor (o a que se cancele).
         while (true) {
             val read = SrtNative.read(handle, buffer, offset, length)
             if (read > 0) {
@@ -45,7 +45,6 @@ class SrtDataSource : BaseDataSource(true) {
                 return read
             }
             if (read < 0) throw IOException("SRT: ${SrtNative.lastError()}")
-            if (++attempts > 50) return 0
         }
     }
 

@@ -5,8 +5,12 @@
 #include <android/log.h>
 #include <srt/srt.h>
 
+#include <arpa/inet.h>
+#include <cstdint>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -19,6 +23,7 @@ namespace {
 
 std::once_flag gInit;
 std::string gLastError = "sin error";
+std::atomic<bool> gCancelled{false};
 
 void setError(const std::string &message) {
     gLastError = message;
@@ -130,15 +135,15 @@ SRTSOCKET openSocket(const std::string &url, int timeoutMs) {
                         static_cast<int>(parsed.streamId.size()));
     }
 
-    sockaddr_storage storage{};
-    socklen_t length = 0;
-    if (!resolve(parsed.host, parsed.port, storage, length)) {
-        srt_close(socket);
-        return SRT_INVALID_SOCK;
-    }
-
     if (listener) {
-        if (srt_bind(socket, reinterpret_cast<sockaddr *>(&storage), length) == SRT_ERROR) {
+        // En modo escucha se atiende en cualquier interfaz: el host de la URL es
+        // la dirección que usa el emisor (por ejemplo vMix), no una dirección
+        // local que haya que reservar. Si el equipo cambia de IP, igual funciona.
+        sockaddr_in any{};
+        any.sin_family = AF_INET;
+        any.sin_addr.s_addr = htonl(INADDR_ANY);
+        any.sin_port = htons(static_cast<uint16_t>(parsed.port));
+        if (srt_bind(socket, reinterpret_cast<sockaddr *>(&any), sizeof(any)) == SRT_ERROR) {
             setError(srt_getlasterror_str());
             srt_close(socket);
             return SRT_INVALID_SOCK;
@@ -148,15 +153,37 @@ SRTSOCKET openSocket(const std::string &url, int timeoutMs) {
             srt_close(socket);
             return SRT_INVALID_SOCK;
         }
-        const int timeout = timeoutMs > 0 ? timeoutMs : 6000;
-        srt_setsockflag(socket, SRTO_RCVTIMEO, &timeout, sizeof(timeout));
-        SRTSOCKET accepted = srt_accept(socket, nullptr, nullptr);
-        srt_close(socket);
-        if (accepted == SRT_INVALID_SOCK) {
-            setError(srt_getlasterror_str());
+        // Se espera al emisor en tramos cortos: no hay que abandonar a los pocos
+        // segundos porque el llamante puede tardar en conectar.
+        const int poll = 250;
+        srt_setsockflag(socket, SRTO_RCVTIMEO, &poll, sizeof(poll));
+        while (true) {
+            if (gCancelled.load()) {
+                setError("Recepción cancelada");
+                srt_close(socket);
+                return SRT_INVALID_SOCK;
+            }
+            const SRTSOCKET accepted = srt_accept(socket, nullptr, nullptr);
+            if (accepted != SRT_INVALID_SOCK) {
+                srt_close(socket);
+                srt_setsockflag(accepted, SRTO_RCVTIMEO, &poll, sizeof(poll));
+                return accepted;
+            }
+            const std::string message = srt_getlasterror_str();
+            const int reason = srt_getlasterror(nullptr);
+            // Agotar la espera sólo significa que el emisor todavía no llegó.
+            if (reason == SRT_ETIMEOUT || reason == SRT_EASYNCRCV) continue;
+            setError(message);
+            srt_close(socket);
             return SRT_INVALID_SOCK;
         }
-        return accepted;
+    }
+
+    sockaddr_storage storage{};
+    socklen_t length = 0;
+    if (!resolve(parsed.host, parsed.port, storage, length)) {
+        srt_close(socket);
+        return SRT_INVALID_SOCK;
     }
 
     const int connectTimeout = timeoutMs > 0 ? timeoutMs : 6000;
@@ -177,6 +204,7 @@ Java_com_ndiapp_camera_net_SrtNative_nativeConnect(JNIEnv *env, jobject, jstring
     const char *chars = env->GetStringUTFChars(url, nullptr);
     std::string address(chars == nullptr ? "" : chars);
     if (chars != nullptr) env->ReleaseStringUTFChars(url, chars);
+    gCancelled.store(false);
     const SRTSOCKET socket = openSocket(address, timeoutMs);
     if (socket == SRT_INVALID_SOCK) {
         LOGE("SRT no pudo conectar a %s: %s", address.c_str(), gLastError.c_str());
@@ -195,14 +223,27 @@ Java_com_ndiapp_camera_net_SrtNative_nativeRead(JNIEnv *env, jobject, jlong hand
         setError("Sin memoria para el búfer de lectura");
         return -1;
     }
-    const int read = srt_recvmsg(socket, reinterpret_cast<char *>(bytes) + offset, length);
-    env->ReleaseByteArrayElements(target, bytes, 0);
-    if (read < 0) {
-        const int reason = srt_getlasterror(nullptr);
-        if (reason == SRT_EASYNCRCV || reason == SRT_ETIMEOUT) return 0;
-        setError(srt_getlasterror_str());
+    if (gCancelled.load()) {
+        setError("Recepción cancelada");
+        env->ReleaseByteArrayElements(target, bytes, JNI_ABORT);
         return -1;
     }
+    const int read = srt_recvmsg(socket, reinterpret_cast<char *>(bytes) + offset, length);
+    if (read < 0) {
+        const std::string message = srt_getlasterror_str();
+        const int reason = srt_getlasterror(nullptr);
+        env->ReleaseByteArrayElements(target, bytes, JNI_ABORT);
+        if (reason == SRT_EASYNCRCV || reason == SRT_ETIMEOUT) {
+            if (gCancelled.load()) {
+                setError("Recepción cancelada");
+                return -1;
+            }
+            return 0;
+        }
+        setError(message);
+        return -1;
+    }
+    env->ReleaseByteArrayElements(target, bytes, 0);
     return read;
 }
 
@@ -238,6 +279,11 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_ndiapp_camera_net_SrtNative_nativeClose(JNIEnv *, jobject, jlong handle) {
     if (handle == 0) return;
     srt_close(static_cast<SRTSOCKET>(handle));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ndiapp_camera_net_SrtNative_nativeCancel(JNIEnv *, jobject) {
+    gCancelled.store(true);
 }
 
 extern "C" JNIEXPORT jstring JNICALL

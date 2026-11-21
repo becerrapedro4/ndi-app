@@ -33,11 +33,17 @@ object SrtNative {
         if (loaded && handle != 0L) nativeClose(handle)
     }
 
+    /** Corta una escucha en curso: el hilo que espera al emisor termina solo. */
+    fun cancel() {
+        if (loaded) nativeCancel()
+    }
+
     fun lastError(): String = if (loaded) nativeLastError() else "libsrt no disponible"
 
     private external fun nativeConnect(url: String, timeoutMs: Int): Long
     private external fun nativeRead(handle: Long, buffer: ByteArray, offset: Int, length: Int): Int
     private external fun nativeWrite(handle: Long, buffer: ByteArray, offset: Int, length: Int): Int
     private external fun nativeClose(handle: Long)
+    private external fun nativeCancel()
     private external fun nativeLastError(): String
 }
