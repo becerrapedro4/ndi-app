@@ -20,7 +20,9 @@ class H264Encoder(
     private val width: Int,
     private val height: Int,
     fps: Int,
-    bitrate: Int
+    bitrate: Int,
+    /** false fuerza YUV420 flexible, para codificadores sin NV12. */
+    preferSemiPlanar: Boolean = true
 ) {
     private companion object {
         const val TAG = "H264Encoder"
@@ -40,7 +42,7 @@ class H264Encoder(
 
     private var spsPps: ByteArray? = null
 
-    private val semiPlanar: Boolean = runCatching {
+    private val semiPlanar: Boolean = preferSemiPlanar && runCatching {
         val formats = codec.codecInfo
             .getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
             .colorFormats
@@ -90,6 +92,18 @@ class H264Encoder(
             drain()
         } catch (t: Throwable) {
             Log.w(TAG, "No se pudo codificar el cuadro", t)
+        }
+    }
+
+    /** Pide un cuadro clave para que el receptor arranque sin esperar. */
+    fun requestKeyFrame() {
+        if (!isRunning) return
+        runCatching {
+            codec.setParameters(
+                android.os.Bundle().apply {
+                    putInt(android.media.MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                }
+            )
         }
     }
 

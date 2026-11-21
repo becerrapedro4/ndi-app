@@ -149,11 +149,15 @@ class TsMuxer {
             var payload: Int
             if (first && keyFrame) {
                 // PCR en el primer paquete de cada cuadro clave.
-                packet[4] = 7
+                val room = PACKET - 12
+                payload = minOf(room, pes.size - position)
+                // Si el cuadro termina dentro de este paquete, el resto se
+                // declara como relleno del campo de adaptación: sin eso los
+                // bytes 0xFF se leerían como parte del PES y rompen el flujo.
+                packet[4] = (7 + (room - payload)).toByte()
                 packet[5] = 0x10
                 writePcr(packet, 6, (pts - 3600).coerceAtLeast(0))
                 offset = 12
-                payload = minOf(PACKET - offset, pes.size - position)
             } else {
                 val rest = pes.size - position
                 if (rest >= PACKET - 4) {

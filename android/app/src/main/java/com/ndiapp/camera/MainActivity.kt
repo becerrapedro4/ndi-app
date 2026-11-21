@@ -279,6 +279,7 @@ private fun AppRoot() {
     DisposableEffect(Unit) {
         onDispose {
             setSystemBarsVisible(activity, true)
+            camera.srtTx.stop()
             camera.session.stop()
         }
     }
@@ -294,9 +295,13 @@ private fun AppRoot() {
                 onSelect = { target ->
                     screen = target
                     if (target == Screen.CAMERA) {
+                        camera.session.previewVisible = true
                         camera.previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
                     } else {
-                        camera.stopPreview()
+                        // La cámara sigue abierta mientras haya una salida en vivo:
+                        // así NDI y SRT no se cortan al abrir el monitor ni otra pestaña.
+                        camera.session.previewVisible = false
+                        if (!camera.running && !camera.srtTxRunning) camera.stopPreview()
                     }
                     scope.launch { drawerState.close() }
                 }
@@ -316,6 +321,26 @@ private fun AppRoot() {
                 Screen.AUDIO -> AudioTab(onMenu = { scope.launch { drawerState.open() } })
                 Screen.MONITOR -> MonitorTab(onMenu = { scope.launch { drawerState.open() } })
             }
+
+            // Con la cámara al aire el resto de la app sigue usable: este aviso
+            // recuerda qué se está emitiendo y vuelve al visor con un toque.
+            if (screen != Screen.CAMERA && !pipActive.value &&
+                (camera.running || camera.srtTxRunning)
+            ) {
+                LivePill(
+                    ndi = camera.running,
+                    srt = camera.srtTxRunning,
+                    detail = camera.srtTxDetail,
+                    onOpen = {
+                        camera.session.previewVisible = true
+                        screen = Screen.CAMERA
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .padding(top = 8.dp)
+                )
+            }
         }
     }
 }
@@ -324,6 +349,44 @@ private fun AppRoot() {
 
 /** La app está en ventana flotante (picture-in-picture) mostrando el monitor. */
 private val pipActive = mutableStateOf(false)
+
+/**
+ * Aviso flotante de emisión: se muestra sobre las demás pestañas mientras la
+ * cámara sigue transmitiendo, con el protocolo activo y el caudal de SRT.
+ */
+@Composable
+private fun LivePill(
+    ndi: Boolean,
+    srt: Boolean,
+    detail: String,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color(0xE60A1018))
+            .border(1.dp, Color(0xFFFF3B30).copy(alpha = 0.65f), RoundedCornerShape(50))
+            .clickable { onOpen() }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
+        Text(
+            buildString {
+                append("EN VIVO")
+                if (ndi) append(" · NDI")
+                if (srt) append(" · SRT")
+                if (detail.isNotBlank()) append(" · ").append(detail)
+            },
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            maxLines = 1
+        )
+    }
+}
 
 /**
  * Silencio compartido: el chip de audio de la cámara también enmudece lo que se
@@ -375,6 +438,9 @@ private class CameraUi(appContext: Context) {
     var srtTxRunning by mutableStateOf(false)
     var srtTxUrl by mutableStateOf(prefs.getString("srt_tx", "").orEmpty())
     var srtTxStatus by mutableStateOf("")
+    // Caudal real y errores de la salida SRT, para no emitir a ciegas.
+    var srtTxDetail by mutableStateOf("")
+    var srtTxNotice by mutableStateOf<String?>(null)
 
     init {
         session.setSurfaceView(surfaceView)
@@ -782,28 +848,39 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
         srtTx.stop()
         srtTxRunning = false
         srtTxStatus = ""
+        srtTxDetail = ""
         return
     }
     if (srtTxUrl.isBlank()) return
     if (!SrtNative.available) {
-        srtTxStatus = "SRT no está en este APK"
+        srtTxNotice = "SRT no está en este APK"
         return
     }
     openPreview(lifecycleOwner)
-    val width = if (fullSensor) height * 3 / 4 else height * 16 / 9
+    srtTxDetail = ""
+    srtTxNotice = null
     srtTx.onStatus = { message ->
         Handler(Looper.getMainLooper()).post { srtTxStatus = message }
     }
     srtTx.onError = { message ->
         Handler(Looper.getMainLooper()).post {
-            srtTxStatus = message
+            srtTxStatus = ""
+            srtTxDetail = ""
             srtTxRunning = false
+            srtTxNotice = message
+        }
+    }
+    srtTx.onProgress = { mbps, rate ->
+        Handler(Looper.getMainLooper()).post {
+            srtTxDetail = String.format(java.util.Locale.US, "%.1f Mb/s · %d fps", mbps, rate)
         }
     }
     srtTx.onStopped = {
         Handler(Looper.getMainLooper()).post { srtTxRunning = false }
     }
-    srtTx.start(srtTxUrl, width, height, fps)
+    // El tamaño del codificador sale del primer cuadro: si cambiás de lente,
+    // encuadre o calidad, se rehace solo sin cortar el socket.
+    srtTx.start(srtTxUrl, fps)
     srtTxRunning = true
 }
 
@@ -976,6 +1053,13 @@ private fun CameraScreen(
         }
     }
 
+    LaunchedEffect(camera.srtTxNotice) {
+        if (camera.srtTxNotice != null) {
+            delay(7000)
+            camera.srtTxNotice = null
+        }
+    }
+
     if (!granted) {
         Column(
             Modifier.fillMaxSize().padding(24.dp),
@@ -1034,6 +1118,23 @@ private fun CameraScreen(
                     .align(Alignment.TopCenter)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
                     .padding(top = 54.dp)
+            )
+        }
+
+        // Salida SRT: dice si conectó, el caudal real o el motivo del fallo.
+        if (camera.srtTxRunning || camera.srtTxStatus.isNotBlank()) {
+            StatusPill(
+                running = camera.srtTxRunning,
+                text = buildString {
+                    append(camera.srtTxStatus.ifBlank { "SRT" })
+                    if (camera.srtTxDetail.isNotBlank()) {
+                        append(" · ").append(camera.srtTxDetail)
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(start = 12.dp, top = 54.dp)
             )
         }
 
@@ -1110,6 +1211,13 @@ private fun CameraScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 camera.recordNotice?.let { message ->
+                    StatusPill(
+                        running = false,
+                        text = message,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+                camera.srtTxNotice?.let { message ->
                     StatusPill(
                         running = false,
                         text = message,
@@ -2438,7 +2546,9 @@ private fun OutboundPanel(srtUrl: String, onSrtUrl: (String) -> Unit) {
             }
         }
         Text(
-            "H.264 en MPEG-TS. Con la URL guardada aparece el botón naranja en la cámara.",
+            "H.264 en MPEG-TS, sin audio. Con la URL guardada aparece el botón naranja "
+                + "en la cámara: ?mode=caller cuando el receptor escucha (vMix) y "
+                + "?mode=listener cuando el receptor se conecta al teléfono.",
             style = MaterialTheme.typography.labelSmall,
             color = NdiGlass.Muted
         )

@@ -113,6 +113,14 @@ class CameraSession(private val context: Context) {
     /** La cámara ya está abierta y sus rangos reales (ISO, EV, obturación) leídos. */
     var onCameraReady: (() -> Unit)? = null
 
+    /**
+     * El visor de cámara está a la vista. Al usar el monitor u otra pestaña
+     * se apaga la copia de cuadros para el visor, pero la cámara, NDI y SRT
+     * siguen trabajando.
+     */
+    @Volatile
+    var previewVisible: Boolean = true
+
     var minZoom: Float = 1f
         private set
 
@@ -536,6 +544,7 @@ class CameraSession(private val context: Context) {
      */
     private fun publishPreview(width: Int, height: Int) {
         val callback = onPreviewFrame ?: return
+        if (!previewVisible) return
         if (width <= 0 || height <= 0) return
         val bytes = width * height * 4
         if (bytes > rgbaBuffer.size) return

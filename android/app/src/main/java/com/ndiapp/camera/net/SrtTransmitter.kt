@@ -1,5 +1,6 @@
 package com.ndiapp.camera.net
 
+import android.os.SystemClock
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -10,6 +11,11 @@ import java.util.concurrent.TimeUnit
  * La conexión y el envío corren en su propio hilo con una cola acotada: si la
  * red no da abasto se descartan paquetes en lugar de frenar la cámara. El hilo
  * de la cámara sólo codifica y encola.
+ *
+ * El codificador se crea con el tamaño del primer cuadro que llega y se rehace
+ * solo si cambia (otra lente, otro encuadre o la resolución del dock), así la
+ * emisión no se corta al tocar la cámara. Hasta que la conexión SRT no está
+ * lista no se codifica nada: lo que se manda empieza por un cuadro clave.
  */
 class SrtTransmitter {
 
@@ -17,8 +23,16 @@ class SrtTransmitter {
     var onError: ((String) -> Unit)? = null
     var onStopped: (() -> Unit)? = null
 
+    /** Cada segundo: caudal real en Mb/s y cuadros codificados por segundo. */
+    var onProgress: ((Float, Int) -> Unit)? = null
+
     @Volatile
     var running = false
+        private set
+
+    /** El socket ya está conectado: recién ahí se codifica. */
+    @Volatile
+    var connected = false
         private set
 
     /** Cuántos paquetes no entraron en la cola (red lenta). */
@@ -32,86 +46,184 @@ class SrtTransmitter {
         private set
 
     private var encoder: H264Encoder? = null
+    private var encoderWidth = 0
+    private var encoderHeight = 0
+    private var fps = 30
     private val muxer = TsMuxer()
     private val queue = ArrayBlockingQueue<ByteArray>(90)
     private var writer: Thread? = null
 
-    fun start(url: String, width: Int, height: Int, fps: Int) {
+    // Cada arranque tiene su número: un hilo viejo que termina tarde no apaga
+    // la emisión nueva ni pisa su estado.
+    @Volatile
+    private var generation = 0
+
+    @Volatile
+    private var frames = 0
+
+    // El sensor entrega tiempos del sistema (ns) y el receptor espera un reloj
+    // que empiece cerca de cero: se resta el primero y nunca se retrocede.
+    private var ptsBase = -1L
+    private var lastPts = 0L
+
+    fun start(url: String, fps: Int) {
         if (running) return
         if (!SrtNative.available) {
             onError?.invoke("libsrt no está en este APK")
             return
         }
-        if (width <= 0 || height <= 0) {
-            onError?.invoke("Tamaño de vídeo inválido")
-            return
+        this.fps = fps.coerceAtLeast(1)
+        queue.clear()
+        dropped = 0
+        sentBytes = 0
+        frames = 0
+        ptsBase = -1L
+        lastPts = 0L
+        connected = false
+        releaseEncoder()
+        val gen = ++generation
+        running = true
+        onStatus?.invoke("Conectando SRT…")
+        writer = Thread({ writerLoop(url.trim(), gen) }, "srt-tx").apply {
+            isDaemon = true
+            start()
         }
+    }
+
+    fun send(frame: YuvFrame) {
+        if (!running || !connected) return
+        if (frame.width <= 0 || frame.height <= 0) return
+        ensureEncoder(frame.width, frame.height)
+        encoder?.submit(frame)
+    }
+
+    fun stop() {
+        generation++
+        running = false
+        connected = false
+        queue.clear()
+        writer?.interrupt()
+        writer = null
+        releaseEncoder()
+    }
+
+    /**
+     * Crea el codificador para ese tamaño, o lo rehace si cambió. Si ninguna
+     * variante de color funciona se deja anotado el tamaño para no reintentar
+     * en cada cuadro.
+     */
+    @Synchronized
+    private fun ensureEncoder(width: Int, height: Int) {
+        if (width == encoderWidth && height == encoderHeight) return
+        val previous = encoder
+        encoder = null
+        previous?.release()
         val bitrate = when {
             height >= 1080 -> 6_000_000
             height >= 720 -> 4_000_000
             else -> 2_500_000
         }
-        queue.clear()
-        dropped = 0
-        sentBytes = 0
-        running = true
-        onStatus?.invoke("Conectando SRT…")
-        writer = Thread({ writerLoop(url) }, "srt-tx").apply {
-            isDaemon = true
-            start()
+        val created = runCatching { H264Encoder(width, height, fps, bitrate, true) }
+            .recoverCatching { H264Encoder(width, height, fps, bitrate, false) }
+            .getOrElse { error ->
+                onError?.invoke("Codificador no disponible: ${error.message}")
+                null
+            }
+        encoderWidth = width
+        encoderHeight = height
+        created?.onAccessUnit = { data, ptsUs, keyFrame ->
+            val muxed = muxer.encode(data, presentationTime(ptsUs), keyFrame)
+            frames++
+            if (!queue.offer(muxed)) dropped++
         }
-        encoder = runCatching { H264Encoder(width, height, fps, bitrate) }.getOrElse { error ->
-            running = false
-            onError?.invoke("Codificador no disponible: ${error.message}")
-            null
-        }
-        encoder?.onAccessUnit = { data, ptsUs, keyFrame ->
-            val packets = muxer.encode(data, ptsUs * 90 / 1000, keyFrame)
-            if (!queue.offer(packets)) dropped++
-        }
+        created?.requestKeyFrame()
+        encoder = created
     }
 
-    fun send(frame: YuvFrame) {
-        if (!running) return
-        encoder?.submit(frame)
+    /** PTS en unidades de 90 kHz, relativo al primer cuadro y sin retrocesos. */
+    private fun presentationTime(ptsUs: Long): Long {
+        if (ptsBase < 0L) ptsBase = ptsUs
+        var pts = ptsUs - ptsBase
+        if (pts < lastPts) pts = lastPts + 33_000L
+        lastPts = pts
+        return pts * 90L / 1000L
     }
 
-    fun stop() {
-        running = false
+    @Synchronized
+    private fun releaseEncoder() {
         encoder?.release()
         encoder = null
-        queue.clear()
-        writer?.interrupt()
-        writer = null
+        encoderWidth = 0
+        encoderHeight = 0
     }
 
-    private fun writerLoop(url: String) {
-        val socket = SrtNative.connect(url, 8000)
-        if (socket == 0L) {
-            running = false
-            encoder?.release()
-            encoder = null
-            onError?.invoke("SRT: ${SrtNative.lastError()}")
-            onStopped?.invoke()
+    private fun writerLoop(url: String, gen: Int) {
+        if (url.isBlank()) {
+            finish(gen, "SRT: falta la URL de salida")
             return
         }
+        val socket = SrtNative.connect(url, 8000)
+        if (socket == 0L) {
+            finish(gen, "SRT: ${SrtNative.lastError()}")
+            return
+        }
+        if (gen != generation) {
+            SrtNative.close(socket)
+            return
+        }
+        connected = true
+        queue.clear()
         onStatus?.invoke("SRT transmitiendo")
+        var windowStart = SystemClock.elapsedRealtime()
+        var windowBytes = 0L
+        var windowFrames = frames
         try {
-            while (running) {
-                val chunk = queue.poll(300, TimeUnit.MILLISECONDS) ?: continue
-                val written = SrtNative.write(socket, chunk, 0, chunk.size)
-                if (written < 0) {
-                    onError?.invoke("SRT: ${SrtNative.lastError()}")
-                    break
+            while (running && gen == generation) {
+                val chunk = queue.poll(250, TimeUnit.MILLISECONDS)
+                if (chunk != null) {
+                    val written = SrtNative.write(socket, chunk, 0, chunk.size)
+                    if (written < 0) {
+                        onError?.invoke("SRT: ${SrtNative.lastError()}")
+                        break
+                    }
+                    sentBytes += written
+                    windowBytes += written
                 }
-                sentBytes += written
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = now - windowStart
+                if (elapsed >= 1000) {
+                    if (gen == generation) {
+                        val mbps = (windowBytes * 8f / 1_000_000f) / (elapsed / 1000f)
+                        val counted = frames
+                        val rate = ((counted - windowFrames) * 1000f / elapsed).toInt()
+                        onProgress?.invoke(mbps, rate)
+                        windowFrames = counted
+                    }
+                    windowBytes = 0L
+                    windowStart = now
+                }
             }
         } catch (_: InterruptedException) {
             // Cierre solicitado desde la interfaz.
         } finally {
-            running = false
             SrtNative.close(socket)
-            onStopped?.invoke()
+            if (gen == generation) {
+                running = false
+                connected = false
+                queue.clear()
+                releaseEncoder()
+                onStopped?.invoke()
+            }
         }
+    }
+
+    /** Fallo antes de conectar: se informa y se cierra la emisión. */
+    private fun finish(gen: Int, message: String) {
+        if (gen != generation) return
+        running = false
+        connected = false
+        releaseEncoder()
+        onError?.invoke(message)
+        onStopped?.invoke()
     }
 }
