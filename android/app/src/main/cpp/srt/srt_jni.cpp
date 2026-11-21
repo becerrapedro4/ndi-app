@@ -15,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #define TAG "SrtJni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
@@ -198,6 +199,31 @@ SRTSOCKET openSocket(const std::string &url, int timeoutMs) {
 
 }  // namespace
 
+namespace {
+
+// libsrt en modo live exige que el búfer de cada srt_recvmsg quepa un payload
+// completo (1316 B con los ajustes por defecto). ExoPlayer pide lecturas más
+// chicas, y libsrt responde "Incorrect use of Message API" si el búfer no
+// alcanza. Por eso se lee a un búfer propio y lo que sobra queda para la
+// próxima llamada.
+constexpr int kLiveMaxPayload = 1500;
+
+std::mutex gPendingLock;
+SRTSOCKET gPendingSocket = SRT_INVALID_SOCK;
+std::vector<char> gPendingData;
+size_t gPendingOffset = 0;
+
+void clearPending(SRTSOCKET socket) {
+    std::lock_guard<std::mutex> lock(gPendingLock);
+    if (socket == SRT_INVALID_SOCK || gPendingSocket == socket) {
+        gPendingSocket = SRT_INVALID_SOCK;
+        gPendingData.clear();
+        gPendingOffset = 0;
+    }
+}
+
+}  // namespace
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_ndiapp_camera_net_SrtNative_nativeConnect(JNIEnv *env, jobject, jstring url, jint timeoutMs) {
     if (url == nullptr) return 0;
@@ -205,6 +231,7 @@ Java_com_ndiapp_camera_net_SrtNative_nativeConnect(JNIEnv *env, jobject, jstring
     std::string address(chars == nullptr ? "" : chars);
     if (chars != nullptr) env->ReleaseStringUTFChars(url, chars);
     gCancelled.store(false);
+    clearPending(SRT_INVALID_SOCK);
     const SRTSOCKET socket = openSocket(address, timeoutMs);
     if (socket == SRT_INVALID_SOCK) {
         LOGE("SRT no pudo conectar a %s: %s", address.c_str(), gLastError.c_str());
@@ -223,12 +250,35 @@ Java_com_ndiapp_camera_net_SrtNative_nativeRead(JNIEnv *env, jobject, jlong hand
         setError("Sin memoria para el búfer de lectura");
         return -1;
     }
+
+    // Primero se entrega lo que sobró de la lectura anterior.
+    {
+        std::lock_guard<std::mutex> lock(gPendingLock);
+        if (gPendingSocket == socket && gPendingOffset < gPendingData.size()) {
+            const int available = static_cast<int>(gPendingData.size() - gPendingOffset);
+            const int copy = length < available ? length : available;
+            std::memcpy(bytes + offset, gPendingData.data() + gPendingOffset,
+                        static_cast<size_t>(copy));
+            gPendingOffset += static_cast<size_t>(copy);
+            if (gPendingOffset >= gPendingData.size()) {
+                gPendingData.clear();
+                gPendingOffset = 0;
+            }
+            env->ReleaseByteArrayElements(target, bytes, 0);
+            return copy;
+        }
+    }
+
     if (gCancelled.load()) {
         setError("Recepción cancelada");
         env->ReleaseByteArrayElements(target, bytes, JNI_ABORT);
         return -1;
     }
-    const int read = srt_recvmsg(socket, reinterpret_cast<char *>(bytes) + offset, length);
+
+    // Nunca se pide a libsrt menos de un payload live completo.
+    const int grab = length > kLiveMaxPayload ? length : kLiveMaxPayload;
+    std::vector<char> staging(static_cast<size_t>(grab));
+    const int read = srt_recvmsg(socket, staging.data(), grab);
     if (read < 0) {
         const std::string message = srt_getlasterror_str();
         const int reason = srt_getlasterror(nullptr);
@@ -243,8 +293,17 @@ Java_com_ndiapp_camera_net_SrtNative_nativeRead(JNIEnv *env, jobject, jlong hand
         setError(message);
         return -1;
     }
+
+    const int copy = length < read ? length : read;
+    std::memcpy(bytes + offset, staging.data(), static_cast<size_t>(copy));
+    if (copy < read) {
+        std::lock_guard<std::mutex> lock(gPendingLock);
+        gPendingSocket = socket;
+        gPendingData.assign(staging.begin() + copy, staging.begin() + read);
+        gPendingOffset = 0;
+    }
     env->ReleaseByteArrayElements(target, bytes, 0);
-    return read;
+    return copy;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -258,12 +317,19 @@ Java_com_ndiapp_camera_net_SrtNative_nativeWrite(JNIEnv *env, jobject, jlong han
         return -1;
     }
     int written = 0;
+    // En modo live cada mensaje va en un paquete: 1316 B como máximo. Se usa la
+    // API msg2, que es la que acepta libsrt en live (con srt_sendmsg rechaza
+    // los argumentos con "Incorrect use of Message API").
+    SRT_MSGCTRL mctrl;
+    std::memset(&mctrl, 0, sizeof(mctrl));
+    srt_msgctrl_init(&mctrl);
+    mctrl.msgttl = SRT_MSGTTL_INF;
+    mctrl.inorder = 1;
     while (written < length) {
-        // SRT rechaza mensajes mayores que su MTU: se parte en trozos de 1316.
         int chunk = length - written;
         if (chunk > 1316) chunk = 1316;
-        const int sent = srt_sendmsg(socket, reinterpret_cast<char *>(bytes) + offset + written,
-                                     chunk, -1, 0);
+        const int sent = srt_sendmsg2(socket, reinterpret_cast<char *>(bytes) + offset + written,
+                                      chunk, &mctrl);
         if (sent < 0) {
             setError(srt_getlasterror_str());
             written = -1;
@@ -278,7 +344,9 @@ Java_com_ndiapp_camera_net_SrtNative_nativeWrite(JNIEnv *env, jobject, jlong han
 extern "C" JNIEXPORT void JNICALL
 Java_com_ndiapp_camera_net_SrtNative_nativeClose(JNIEnv *, jobject, jlong handle) {
     if (handle == 0) return;
-    srt_close(static_cast<SRTSOCKET>(handle));
+    const SRTSOCKET socket = static_cast<SRTSOCKET>(handle);
+    clearPending(socket);
+    srt_close(socket);
 }
 
 extern "C" JNIEXPORT void JNICALL

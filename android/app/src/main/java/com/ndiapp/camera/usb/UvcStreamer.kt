@@ -77,6 +77,8 @@ class UvcStreamer(
     private var frameHeight = 0
     private var isBulk = false
     private var bufferSize = 0
+    private var altSetting = 0
+    private var interfaceReady = false
     private var lastEmit = 0L
 
     private val frameBuffer = ByteArrayOutputStream(512 * 1024)
@@ -185,7 +187,9 @@ class UvcStreamer(
             return fail(t.message ?: "La cámara rechazó el formato elegido")
         }
 
-        if (!conn.setInterface(streamInterface)) {
+        altSetting = streamInterface.alternateSetting
+        interfaceReady = conn.setInterface(streamInterface)
+        if (!interfaceReady) {
             Log.w(TAG, "setInterface devolvió false; se intenta emitir igualmente")
         }
 
@@ -255,7 +259,15 @@ class UvcStreamer(
             buffers.add(buffer)
         }
         if (requests.isEmpty()) {
-            onStatus("No se pudo encolar la lectura isocrona")
+            // Android rechaza la cola isocrona cuando no pudo activar el alt
+            // setting, cuando el cable no aguanta el ancho de banda o cuando el
+            // concentrador no da el turno. El aviso dice cuál de los tres mirar.
+            val pista = if (interfaceReady) {
+                "revisa el cable y el puerto USB"
+            } else {
+                "el teléfono no activó el alt $altSetting: revisa el cable o el puerto"
+            }
+            onStatus("No se pudo encolar la lectura isocrona ($size B, alt $altSetting) · $pista")
             return
         }
         val data = ByteArray(size)
