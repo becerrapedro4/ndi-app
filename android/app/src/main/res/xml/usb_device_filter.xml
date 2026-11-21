@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Dispositivos que abren NDI App al conectarse: cámaras y capturadoras UVC.
+    La clase 14 es la de vídeo; la 239 con subclase 2 es la asociación de
+    interfaces (IAD) que usan muchas cámaras para agrupar el control y el flujo.
+-->
+<resources>
+    <usb-device class="14" />
+    <usb-device class="239" subclass="2" protocol="1" />
+</resources>

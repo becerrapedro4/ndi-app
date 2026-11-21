@@ -49,12 +49,16 @@ object UvcCameras {
         val device = manager.deviceList.values
             .firstOrNull { it.deviceName == camera.deviceName } ?: return false
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_MUTABLE
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         } else {
-            0
+            PendingIntent.FLAG_UPDATE_CURRENT
         }
         val intent = Intent(action).setPackage(context.packageName)
-        val pending = PendingIntent.getBroadcast(context, 0, intent, flags)
+        // Un código por dispositivo: con el mismo para todos, el sistema reutiliza
+        // el PendingIntent y el resultado del permiso se pierde.
+        val pending = PendingIntent.getBroadcast(
+            context, device.deviceName.hashCode(), intent, flags
+        )
         manager.requestPermission(device, pending)
         return true
     }

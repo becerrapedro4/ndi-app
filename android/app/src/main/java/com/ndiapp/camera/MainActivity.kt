@@ -190,6 +190,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // Con la app abierta, conectar una cámara lleva a su pestaña.
+        if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) usbAttachSignal.intValue++
+    }
+
     /** NDI usa mDNS/multicast para descubrir fuentes: sin este lock el descubrimiento falla. */
     private fun enableMulticast() {
         runCatching {
@@ -216,6 +223,9 @@ private fun setSystemBarsVisible(activity: Activity?, visible: Boolean) {
 
 private enum class Screen { CAMERA, SCREEN, MULTIMEDIA, UVC, AUDIO, MONITOR }
 
+/** Cámara USB conectada con la app ya abierta: lleva al visor de esa fuente. */
+private val usbAttachSignal = mutableIntStateOf(0)
+
 // ------------------------------------------------------------------- raíz ---
 
 
@@ -228,8 +238,38 @@ private fun AppRoot() {
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
-    var screen by rememberSaveable { mutableStateOf(Screen.CAMERA) }
+    // Si abrieron la app al conectar una cámara USB, arranca en esa pestaña.
+    val openedFromUsb = activity?.intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED
+    var screen by rememberSaveable {
+        mutableStateOf(if (openedFromUsb) Screen.UVC else Screen.CAMERA)
+    }
     val camera = remember { CameraUi(context.applicationContext) }
+
+    // Permiso USB: apenas se conecta la cámara la app pide el acceso, aunque no
+    // se esté en la pestaña Cámara USB. Si no se pide, el sistema no muestra el
+    // aviso y el dispositivo queda sin autorizar (sólo lo abre otra app).
+    val usbPermissionAction = remember { "${context.packageName}.USB_PERMISSION" }
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context?, intent: Intent?) {
+                if (intent?.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
+                UvcCameras.list(context)
+                    .filter { !it.hasPermission }
+                    .forEach { UvcCameras.requestPermission(context, it, usbPermissionAction) }
+            }
+        }
+        val filter = IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
+    }
+
+    LaunchedEffect(usbAttachSignal.intValue) {
+        if (usbAttachSignal.intValue > 0) screen = Screen.UVC
+    }
 
     // El visor de cámara ocupa toda la pantalla: en él se ocultan las barras del
     // sistema en portrait y en landscape. En el resto de pantallas se muestran.
@@ -4177,15 +4217,21 @@ private fun UvcTab(onMenu: () -> Unit) {
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        GlassChip("Permiso", camera.hasPermission, camera.hasPermission) {
+                        GlassChip("Permiso", camera.hasPermission, true) {
                             if (!camera.hasPermission) {
-                                UvcCameras.requestPermission(context, camera, usbAction)
+                                status = if (
+                                    UvcCameras.requestPermission(context, camera, usbAction)
+                                ) {
+                                    "Acepta el permiso USB para la cámara"
+                                } else {
+                                    "No se pudo pedir el permiso USB"
+                                }
                             }
                         }
                         GlassChip(
                             if (active == camera.deviceName) "Detener" else "Emitir",
                             active == camera.deviceName,
-                            camera.hasPermission
+                            true
                         ) {
                             if (active == camera.deviceName) {
                                 source.stop()
