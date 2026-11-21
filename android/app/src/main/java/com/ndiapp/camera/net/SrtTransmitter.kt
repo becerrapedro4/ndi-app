@@ -26,6 +26,9 @@ class SrtTransmitter {
     /** Cada segundo: caudal real en Mb/s y cuadros codificados por segundo. */
     var onProgress: ((Float, Int) -> Unit)? = null
 
+    /** Aviso que no corta el vídeo (por ejemplo, AAC no disponible). */
+    var onWarning: ((String) -> Unit)? = null
+
     @Volatile
     var running = false
         private set
@@ -48,6 +51,10 @@ class SrtTransmitter {
     private var encoder: H264Encoder? = null
     private var encoderWidth = 0
     private var encoderHeight = 0
+    private var aac: AacEncoder? = null
+    private var aacChannels = 0
+    private var aacRate = 0
+    private var aacFailure = ""
     private var fps = 30
     private val muxer = TsMuxer()
     private val queue = ArrayBlockingQueue<ByteArray>(90)
@@ -63,6 +70,8 @@ class SrtTransmitter {
 
     // El sensor entrega tiempos del sistema (ns) y el receptor espera un reloj
     // que empiece cerca de cero: se resta el primero y nunca se retrocede.
+    // Lo lee también el hilo del micrófono para alinear el audio.
+    @Volatile
     private var ptsBase = -1L
     private var lastPts = 0L
 
@@ -81,6 +90,8 @@ class SrtTransmitter {
         lastPts = 0L
         connected = false
         releaseEncoder()
+        releaseAac()
+        muxer.setAudio(false)
         val gen = ++generation
         running = true
         onStatus?.invoke("Conectando SRT…")
@@ -97,6 +108,17 @@ class SrtTransmitter {
         encoder?.submit(frame)
     }
 
+    /**
+     * PCM del micrófono (float intercalado), el mismo que va por NDI. Se
+     * convierte a AAC-LC y se muxea junto al vídeo en el MPEG-TS.
+     */
+    fun sendAudio(pcm: FloatArray, samples: Int, channels: Int, sampleRate: Int) {
+        if (!running || !connected) return
+        if (samples <= 0 || channels <= 0 || sampleRate <= 0) return
+        val leadUs = samples.toLong() * 1_000_000L / sampleRate
+        ensureAac(channels, sampleRate, leadUs)?.submit(pcm, samples)
+    }
+
     fun stop() {
         generation++
         running = false
@@ -105,6 +127,7 @@ class SrtTransmitter {
         writer?.interrupt()
         writer = null
         releaseEncoder()
+        releaseAac()
     }
 
     /**
@@ -138,6 +161,53 @@ class SrtTransmitter {
         }
         created?.requestKeyFrame()
         encoder = created
+    }
+
+    /**
+     * Crea el codificador AAC y anuncia la pista en el PMT. Si el equipo no
+     * tiene AAC se avisa una sola vez y el vídeo sigue saliendo solo.
+     */
+    @Synchronized
+    private fun ensureAac(channels: Int, sampleRate: Int, leadUs: Long): AacEncoder? {
+        if (aac != null && channels == aacChannels && sampleRate == aacRate) return aac
+        val signature = "$channels@$sampleRate"
+        if (aac == null && aacFailure == signature) return null
+        aac?.release()
+        aac = null
+        val created = runCatching { AacEncoder(sampleRate, channels, audioStartUs(leadUs)) }
+            .getOrElse { error ->
+                aacFailure = signature
+                onWarning?.invoke("Audio AAC no disponible: ${error.message}")
+                null
+            }
+        aacChannels = channels
+        aacRate = sampleRate
+        created?.onFrame = { frame, ptsUs ->
+            val muxed = muxer.encodeAudio(frame, ptsUs * 90L / 1000L)
+            if (!queue.offer(muxed)) dropped++
+        }
+        if (created != null) {
+            // El PMT tiene que anunciar el audio antes del primer PES.
+            muxer.setAudio(true)
+            queue.offer(muxer.psi())
+        }
+        aac = created
+        return created
+    }
+
+    /** Primer PTS del audio en la misma base que el vídeo, sin el búfer leído. */
+    private fun audioStartUs(leadUs: Long): Long {
+        val base = if (ptsBase >= 0L) ptsBase else System.nanoTime() / 1000L
+        return (System.nanoTime() / 1000L - base) - leadUs
+    }
+
+    @Synchronized
+    private fun releaseAac() {
+        aac?.release()
+        aac = null
+        aacChannels = 0
+        aacRate = 0
+        aacFailure = ""
     }
 
     /** PTS en unidades de 90 kHz, relativo al primer cuadro y sin retrocesos. */
@@ -212,6 +282,7 @@ class SrtTransmitter {
                 connected = false
                 queue.clear()
                 releaseEncoder()
+                releaseAac()
                 onStopped?.invoke()
             }
         }
@@ -223,6 +294,7 @@ class SrtTransmitter {
         running = false
         connected = false
         releaseEncoder()
+        releaseAac()
         onError?.invoke(message)
         onStopped?.invoke()
     }

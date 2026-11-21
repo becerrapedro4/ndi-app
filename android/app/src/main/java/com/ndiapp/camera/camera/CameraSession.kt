@@ -110,6 +110,16 @@ class CameraSession(private val context: Context) {
      */
     var onYuvFrame: ((YuvFrame) -> Unit)? = null
 
+    /**
+     * PCM del micrófono tal como sale de la captura. Lo usa la salida SRT,
+     * que lleva el mismo sonido que la fuente NDI aunque NDI esté apagado.
+     */
+    var onAudioFrame: ((FloatArray, Int, Int, Int) -> Unit)? = null
+
+    /** La salida SRT sigue usando el micrófono: cortar NDI no lo suelta. */
+    @Volatile
+    var keepAudioForSrt = false
+
     /** La cámara ya está abierta y sus rangos reales (ISO, EV, obturación) leídos. */
     var onCameraReady: (() -> Unit)? = null
 
@@ -589,16 +599,22 @@ class CameraSession(private val context: Context) {
     private fun startAudio(req: CameraRequest) {
         if (audio != null) return
         audio = AudioCapture { pcm, samples, channels, rate ->
-            if (!muted) sender?.sendAudio(pcm, samples, channels, rate)
+            if (!muted) {
+                sender?.sendAudio(pcm, samples, channels, rate)
+                onAudioFrame?.invoke(pcm, samples, channels, rate)
+            }
         }.also { it.start() }
     }
 
     /** Corta la emisión NDI y deja la vista previa en marcha. */
     fun stopStreaming() {
-        audio?.stop()
-        audio = null
         sender?.close()
         sender = null
+        // Si la salida SRT sigue al aire, el micrófono no se suelta.
+        if (!keepAudioForSrt) {
+            audio?.stop()
+            audio = null
+        }
         if (request != null) onStatus?.invoke("Vista previa")
     }
 
@@ -772,6 +788,34 @@ class CameraSession(private val context: Context) {
         muted = value
     }
 
+    /** Enciende o apaga el micrófono de todas las salidas (NDI y SRT). */
+    fun setAudioEnabled(enabled: Boolean) {
+        muted = !enabled
+        val req = request ?: return
+        request = req.copy(withAudio = enabled)
+        when {
+            enabled && keepAudioForSrt -> startAudio(req.copy(withAudio = true))
+            !enabled && sender == null -> {
+                audio?.stop()
+                audio = null
+            }
+        }
+    }
+
+    /** Arranca el micrófono para la salida SRT aunque NDI esté apagado. */
+    fun ensureAudioCapture() {
+        val req = request ?: return
+        if (!req.withAudio || audioSuspendedForRecording || audio != null) return
+        startAudio(req)
+    }
+
+    /** Suelta el micrófono cuando ninguna salida lo está usando. */
+    fun releaseAudioCaptureIfIdle() {
+        if (sender != null || audioSuspendedForRecording || keepAudioForSrt) return
+        audio?.stop()
+        audio = null
+    }
+
     // ------------------------------------------------------------ grabación --
 
     /** Graba la vista previa en un MP4 dentro de Películas/NDI App. */
@@ -879,7 +923,7 @@ class CameraSession(private val context: Context) {
         if (!audioSuspendedForRecording) return
         audioSuspendedForRecording = false
         val req = request ?: return
-        if (req.withAudio && sender != null) startAudio(req)
+        if (req.withAudio && (sender != null || keepAudioForSrt)) startAudio(req)
     }
 
     /** Copia la grabación a la galería para que quede visible fuera de la app. */

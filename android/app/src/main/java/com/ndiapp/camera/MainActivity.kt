@@ -812,6 +812,10 @@ private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
     }
     session.onPreviewFrame = { bitmap -> cameraView.setFrame(bitmap) }
     session.onYuvFrame = { frame -> if (srtTxRunning) srtTx.send(frame) }
+    // El micrófono alimenta NDI y la salida SRT a la vez.
+    session.onAudioFrame = { pcm, samples, channels, rate ->
+        if (srtTxRunning) srtTx.sendAudio(pcm, samples, channels, rate)
+    }
     session.start(previewView, lifecycleOwner, cameraRequest())
     previewing = true
     status = "Vista previa"
@@ -849,6 +853,8 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
         srtTxRunning = false
         srtTxStatus = ""
         srtTxDetail = ""
+        session.keepAudioForSrt = false
+        session.releaseAudioCaptureIfIdle()
         return
     }
     if (srtTxUrl.isBlank()) return
@@ -857,10 +863,17 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
         return
     }
     openPreview(lifecycleOwner)
+    // El micrófono se enciende aunque NDI esté apagado: la salida SRT lleva
+    // imagen y sonido, igual que la fuente NDI.
+    session.keepAudioForSrt = true
+    session.ensureAudioCapture()
     srtTxDetail = ""
     srtTxNotice = null
     srtTx.onStatus = { message ->
         Handler(Looper.getMainLooper()).post { srtTxStatus = message }
+    }
+    srtTx.onWarning = { message ->
+        Handler(Looper.getMainLooper()).post { srtTxNotice = message }
     }
     srtTx.onError = { message ->
         Handler(Looper.getMainLooper()).post {
@@ -868,6 +881,8 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
             srtTxDetail = ""
             srtTxRunning = false
             srtTxNotice = message
+            session.keepAudioForSrt = false
+            session.releaseAudioCaptureIfIdle()
         }
     }
     srtTx.onProgress = { mbps, rate ->
@@ -876,7 +891,11 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
         }
     }
     srtTx.onStopped = {
-        Handler(Looper.getMainLooper()).post { srtTxRunning = false }
+        Handler(Looper.getMainLooper()).post {
+            srtTxRunning = false
+            session.keepAudioForSrt = false
+            session.releaseAudioCaptureIfIdle()
+        }
     }
     // El tamaño del codificador sale del primer cuadro: si cambiás de lente,
     // encuadre o calidad, se rehace solo sin cortar el socket.
@@ -1274,6 +1293,9 @@ private fun CameraScreen(
                     } else {
                         camera.withAudio = !camera.withAudio
                         monitorMuted.value = !camera.withAudio
+                        // Con la cámara en vista previa el chip apaga también el
+                        // micrófono de la salida SRT.
+                        camera.session.setAudioEnabled(camera.withAudio)
                     }
                 },
                 onFlip = {
@@ -2546,9 +2568,9 @@ private fun OutboundPanel(srtUrl: String, onSrtUrl: (String) -> Unit) {
             }
         }
         Text(
-            "H.264 en MPEG-TS, sin audio. Con la URL guardada aparece el botón naranja "
-                + "en la cámara: ?mode=caller cuando el receptor escucha (vMix) y "
-                + "?mode=listener cuando el receptor se conecta al teléfono.",
+            "H.264 y AAC (micrófono) en MPEG-TS. Con la URL guardada aparece el botón "
+                + "naranja en la cámara: ?mode=caller cuando el receptor escucha (vMix) "
+                + "y ?mode=listener cuando el receptor se conecta al teléfono.",
             style = MaterialTheme.typography.labelSmall,
             color = NdiGlass.Muted
         )
