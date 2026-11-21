@@ -1,0 +1,119 @@
+name: Android CI / APK Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/gradle.properties', 'android/gradlew') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # El NDK es necesario para compilar libsrt y el puente JNI.
+      - name: Install Android NDK 26.1.10909125
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install "ndk;26.1.10909125"
+          ls "$ANDROID_SDK_ROOT/ndk" 2>/dev/null || ls "$ANDROID_HOME/ndk"
+
+      # libsrt se compila desde el código oficial de Haivision con el toolchain
+      # del NDK. Se enlaza estáticamente dentro de libsrt_app.so, así que el APK
+      # no necesita ninguna .so extra en tiempo de ejecución.
+      - name: Build libsrt (Haivision) for Android
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          NDK="$SDK_ROOT/ndk/26.1.10909125"
+          if [ ! -d "$NDK" ]; then echo "NDK no encontrado en $NDK"; exit 1; fi
+
+          SRT_TAG=v1.5.4
+          git clone --depth 1 --branch "$SRT_TAG" https://github.com/Haivision/srt.git /tmp/srt-src
+
+          INCLUDE_DIR="android/app/src/main/cpp/srt/include"
+          mkdir -p "$INCLUDE_DIR"
+
+          for abi in arm64-v8a armeabi-v7a; do
+            BUILD="/tmp/srt-build-$abi"
+            cmake -S /tmp/srt-src -B "$BUILD" \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" \
+              -DANDROID_PLATFORM=android-26 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_APPS=OFF \
+              -DENABLE_SHARED=OFF \
+              -DENABLE_STATIC=ON \
+              -DENABLE_ENCRYPTION=OFF \
+              -DENABLE_UNITTESTS=OFF
+            cmake --build "$BUILD" -j"$(nproc)"
+
+            mkdir -p "android/app/src/main/cpp/srt/lib/$abi"
+            LIB=$(find "$BUILD" -name 'libsrt.a' -print -quit)
+            if [ -z "$LIB" ]; then echo "libsrt.a no generada para $abi"; exit 1; fi
+            cp "$LIB" "android/app/src/main/cpp/srt/lib/$abi/libsrt.a"
+            if [ -f "$BUILD/version.h" ]; then cp "$BUILD/version.h" "$INCLUDE_DIR/"; fi
+          done
+
+          cp /tmp/srt-src/srtcore/*.h "$INCLUDE_DIR/"
+          echo "--- artefactos SRT ---"
+          ls -la "$INCLUDE_DIR" | head -20
+          find android/app/src/main/cpp/srt/lib -name 'libsrt.a' -exec ls -la {} \;
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x android/gradlew
+
+      - name: Assemble Debug APK
+        run: cd android && ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload Mapping File
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapping-file
+          path: android/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: ignore
+
+      - name: Upload Proguard Mapping
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proguard-mapping
+          path: android/app/build/outputs/mapping/debug/mapping.txt
+          if-no-files-found: ignore
+
+      - name: Print build completion
+        run: |
+          echo "=== BUILD COMPLETE ==="
+          ls -la android/app/build/outputs/apk/debug/ 2>/dev/null || echo "No APK found"

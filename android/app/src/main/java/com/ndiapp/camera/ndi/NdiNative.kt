@@ -6,10 +6,14 @@ package com.ndiapp.camera.ndi
  */
 object NdiNative {
 
-    init {
+    /**
+     * El puente (ndi_app) siempre existe; libndi.so solo si se compiló con el SDK
+     * de NDI. Sin él se usa un stub que responde isSdkAvailable() = false.
+     */
+    private val runtimeLoaded: Boolean = runCatching {
         System.loadLibrary("ndi_app")
         System.loadLibrary("ndi")
-    }
+    }.isSuccess
 
     external fun isSdkAvailable(): Boolean
 
