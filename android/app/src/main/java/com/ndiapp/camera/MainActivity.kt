@@ -3237,6 +3237,8 @@ private fun MonitorTab(onMenu: () -> Unit) {
     var cleanHint by remember { mutableStateOf(false) }
     var stats by remember { mutableStateOf(StreamStats()) }
     var proxy by remember { mutableStateOf(false) }
+    // Caudal medido con el flujo completo, para decir en pantalla cuánto baja el proxy.
+    var nativeMbps by remember { mutableStateOf(0f) }
     var net by remember { mutableStateOf(LocalNetwork(false, "", false)) }
     var guides by remember { mutableIntStateOf(0) }
     val activity = LocalContext.current as? Activity
@@ -3273,18 +3275,32 @@ private fun MonitorTab(onMenu: () -> Unit) {
         player = null
         rtspError = null
         playing = chosen
+        // 720p/540p piden además el flujo proxy: sin eso sólo bajarían los píxeles
+        // del teléfono y el caudal de red seguiría siendo el de la fuente.
+        val reduced = proxy || rxHeightLimit.get() != 0
         receiver.start(
             scope = scope,
             source = chosen,
             audioEnabled = { audio },
-            lowBandwidth = proxy,
+            lowBandwidth = reduced,
             maxHeight = { rxHeightLimit.get() },
             onFrame = { bitmap ->
                 frame = bitmap
                 frameSeq++
             },
-            onStats = { values -> stats = values }
+            onStats = { values ->
+                stats = values
+                if (!reduced && values.fps > 1f) nativeMbps = values.mbps
+            }
         )
+    }
+
+    /** Reabre la fuente para que el cambio de resolución y de proxy valga ya. */
+    val reconnectSource: () -> Unit = {
+        playing?.let { current ->
+            receiver.stop()
+            openSource(current)
+        }
     }
 
     /** Reproduce una URL rtsp:// o srt:// en el monitor. */
@@ -3615,12 +3631,17 @@ private fun MonitorTab(onMenu: () -> Unit) {
                                 modifier = Modifier.weight(1f)
                             )
                             GlassChip("Audio", audio) { audio = !audio }
-                            GlassChip("Proxy", proxy) {
-                                proxy = !proxy
-                                playing?.let { current ->
-                                    receiver.stop()
-                                    openSource(current)
+                            GlassChip("Proxy", proxy || rxHeight != 0) {
+                                if (proxy || rxHeight != 0) {
+                                    // Apagar el proxy devuelve la fuente a su flujo completo.
+                                    proxy = false
+                                    rxHeight = 0
+                                    rxHeightLimit.set(0)
+                                    prefs.edit().putInt("ndi_rx_height", 0).apply()
+                                } else {
+                                    proxy = true
                                 }
+                                reconnectSource()
                             }
                             GlassChip(
                                 when (guides) {
@@ -3652,12 +3673,17 @@ private fun MonitorTab(onMenu: () -> Unit) {
                                     GlassChip(option.second, rxHeight == option.first) {
                                         rxHeight = option.first
                                         rxHeightLimit.set(option.first)
+                                        // Bajar resolución también pide el flujo proxy al
+                                        // emisor, así que el caudal de red baja de verdad.
+                                        proxy = option.first != 0
                                         prefs.edit()
                                             .putInt("ndi_rx_height", option.first)
                                             .apply()
+                                        reconnectSource()
                                     }
                                 }
                         }
+                        val reducedRx = proxy || rxHeight != 0
                         Text(
                             when (rxHeight) {
                                 720 -> "720p: el visor mueve el 44 % de los píxeles de un " +
@@ -3665,7 +3691,22 @@ private fun MonitorTab(onMenu: () -> Unit) {
                                 540 -> "540p: el visor mueve el 25 % de los píxeles de un " +
                                     "cuadro 1080p."
                                 else -> "Nativa: el cuadro llega al tamaño de la fuente."
-                            } + " El caudal de red solo baja con el chip Proxy.",
+                            } + " " + when {
+                                !reducedRx ->
+                                    "Sin proxy llega el flujo completo de la fuente, con todo " +
+                                        "su caudal de red."
+                                nativeMbps > 0.2f && stats.mbps > 0.05f ->
+                                    "Con proxy el emisor manda su flujo reducido: el caudal " +
+                                        "real bajó de " + String.format("%.1f", nativeMbps) +
+                                        " Mb/s a " + String.format("%.1f", stats.mbps) + " Mb/s (" +
+                                        "−" + ((1f - stats.mbps / nativeMbps) * 100f)
+                                            .coerceIn(0f, 100f).toInt() + " %)."
+                                else ->
+                                    "Con proxy el emisor manda su flujo reducido, normalmente " +
+                                        "un tercio del caudal o menos; ahora llegan " +
+                                        String.format("%.1f", stats.mbps) + " Mb/s. Si la " +
+                                        "fuente no publica proxy, NDI entrega el flujo completo."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = NdiGlass.Muted
                         )
