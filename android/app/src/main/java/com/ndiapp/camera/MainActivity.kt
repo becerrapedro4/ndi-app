@@ -95,6 +95,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -189,6 +190,8 @@ class MainActivity : ComponentActivity() {
         // Cualquier fallo queda anotado y se muestra al abrir la app otra vez.
         CrashLog.install(this)
         lastCrashText = CrashLog.take(this)?.let { CrashLog.summary(it) }
+        // Si abrieron la app con «Abrir con NDI App», el archivo va a Multimedia.
+        collectViewIntent(intent)
         enableMulticast()
         // Los datos móviles no pueden llevarse el multicast de NDI.
         bindToWifi(this)
@@ -202,6 +205,8 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        // «Abrir con NDI App» con la app ya abierta: el archivo va a la lista.
+        collectViewIntent(intent)
         // Con la app abierta, conectar una cámara lleva a su pestaña.
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) usbAttachSignal.intValue++
     }
@@ -350,6 +355,16 @@ private enum class Screen { CAMERA, SCREEN, MULTIMEDIA, UVC, AUDIO, MONITOR, SRT
 /** Cámara USB conectada con la app ya abierta: lleva al visor de esa fuente. */
 private val usbAttachSignal = mutableIntStateOf(0)
 
+/** Archivos abiertos con «Abrir con NDI App»; la pestaña Multimedia los consume. */
+private val incomingMedia = mutableStateListOf<android.net.Uri>()
+
+/** Guarda el archivo de un intent ACTION_VIEW para que Multimedia lo emita. */
+private fun collectViewIntent(intent: Intent?) {
+    if (intent?.action != Intent.ACTION_VIEW) return
+    val uri = intent.data ?: return
+    if (incomingMedia.none { it == uri }) incomingMedia.add(uri)
+}
+
 // ------------------------------------------------------------------- raíz ---
 
 
@@ -362,10 +377,18 @@ private fun AppRoot() {
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
-    // Si abrieron la app al conectar una cámara USB, arranca en esa pestaña.
+    // Si abrieron la app al conectar una cámara USB o al abrir un archivo con
+    // «Abrir con NDI App», arranca en esa pestaña.
     val openedFromUsb = activity?.intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED
+    val openedFromMedia = activity?.intent?.action == Intent.ACTION_VIEW
     var screen by rememberSaveable {
-        mutableStateOf(if (openedFromUsb) Screen.UVC else Screen.CAMERA)
+        mutableStateOf(
+            when {
+                openedFromUsb -> Screen.UVC
+                openedFromMedia -> Screen.MULTIMEDIA
+                else -> Screen.CAMERA
+            }
+        )
     }
     val camera = remember { CameraUi(context.applicationContext) }
 
@@ -393,6 +416,11 @@ private fun AppRoot() {
 
     LaunchedEffect(usbAttachSignal.intValue) {
         if (usbAttachSignal.intValue > 0) screen = Screen.UVC
+    }
+
+    // Un archivo abierto con «Abrir con NDI App» lleva a Multimedia, que lo emite.
+    LaunchedEffect(incomingMedia.size) {
+        if (incomingMedia.isNotEmpty()) screen = Screen.MULTIMEDIA
     }
 
     // El visor de cámara ocupa toda la pantalla: en él se ocultan las barras del
@@ -3989,6 +4017,23 @@ private class NdiVideoView(context: Context) : android.view.View(context) {
 
 // -------------------------------------------------------------- multimedia --
 
+/** Tipo de archivo por MIME y, si el proveedor no lo informa, por la extensión. */
+private fun mediaKindFor(context: Context, uri: android.net.Uri): MediaKind? {
+    val mime = runCatching { context.contentResolver.getType(uri) }
+        .getOrNull().orEmpty().lowercase()
+    when {
+        mime.startsWith("video/") -> return MediaKind.VIDEO
+        mime.startsWith("image/") -> return MediaKind.IMAGE
+        mime.startsWith("audio/") -> return MediaKind.AUDIO
+    }
+    return when (uri.lastPathSegment?.substringAfterLast('.', "")?.lowercase()) {
+        "mp4", "m4v", "mkv", "mov", "webm", "avi", "3gp", "ts", "mts" -> MediaKind.VIDEO
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "avif" -> MediaKind.IMAGE
+        "mp3", "wav", "aac", "m4a", "flac", "ogg", "opus", "amr" -> MediaKind.AUDIO
+        else -> null
+    }
+}
+
 private fun queryDisplayName(context: Context, uri: android.net.Uri): String {
     runCatching {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
@@ -4322,10 +4367,9 @@ private fun MediaTab(onMenu: () -> Unit) {
         status = "Detenido · pulsa Reproducir para reanudar"
     }
 
-    val picker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+    /** Añade archivos a la lista (selector o «Abrir con NDI App») y los emite. */
+    fun addUris(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
         val added = uris.mapNotNull { uri ->
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
@@ -4333,25 +4377,36 @@ private fun MediaTab(onMenu: () -> Unit) {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            val mime = context.contentResolver.getType(uri).orEmpty()
-            val kind = when {
-                mime.startsWith("video/") -> MediaKind.VIDEO
-                mime.startsWith("image/") -> MediaKind.IMAGE
-                mime.startsWith("audio/") -> MediaKind.AUDIO
-                else -> null
-            } ?: return@mapNotNull null
+            val kind = mediaKindFor(context, uri) ?: return@mapNotNull null
             MediaItem(uri, queryDisplayName(context, uri), kind)
         }
         if (added.isEmpty()) {
             status = "No se reconocieron esos archivos"
-            return@rememberLauncherForActivityResult
+            return
         }
         playlist = playlist + added
         bindPlayer()
         val from = if (current >= 0) current else 0
         sending = player.start(playlist, "NDI App Multimedia", from)
         player.setExtraRotation(rotation)
-        if (!sending) status = "No se pudo iniciar la fuente NDI"
+        status = if (sending) {
+            "Reproduciendo «${added.first().name}»"
+        } else {
+            "No se pudo iniciar la fuente NDI"
+        }
+    }
+
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris -> addUris(uris) }
+
+    // Un vídeo, una foto o un audio abierto desde otra app llega como ACTION_VIEW.
+    LaunchedEffect(incomingMedia.size) {
+        if (incomingMedia.isNotEmpty()) {
+            val uris = incomingMedia.toList()
+            incomingMedia.clear()
+            addUris(uris)
+        }
     }
 
     DisposableEffect(Unit) {
@@ -4371,196 +4426,247 @@ private fun MediaTab(onMenu: () -> Unit) {
             onMenu = onMenu
         )
 
-        Column(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            GlassPanel(title = "Emisión") {
-                val shot = preview
-                val tick = previewTick
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(Color.Black),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (shot != null) {
-                        AndroidView(
-                            factory = { ctx -> NdiVideoView(ctx) },
-                            update = { view -> if (tick >= 0) view.setFrame(shot) },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Text(
-                            "Sin vista previa",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = NdiGlass.Muted
-                        )
-                    }
-                }
-                StatusPill(running = sending, text = status)
-                if (duration > 0) {
-                    Slider(
-                        value = position.coerceIn(0, duration).toFloat(),
-                        onValueChange = { position = it.roundToInt() },
-                        onValueChangeFinished = { player.seekTo(position) },
-                        valueRange = 0f..duration.toFloat().coerceAtLeast(1f)
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(clockText(position / 1000), fontSize = 10.sp, color = NdiGlass.Muted)
-                        Text(clockText(duration / 1000), fontSize = 10.sp, color = NdiGlass.Muted)
-                    }
-                }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TransportButton(TransportGlyph.PREV, "Anterior", enabled = sending) {
-                        player.previous()
-                    }
-                    TransportButton(TransportGlyph.STOP, "Detener", enabled = sending) {
-                        stopAll()
-                    }
-                    TransportButton(
-                        glyph = if (playing) TransportGlyph.PAUSE else TransportGlyph.PLAY,
-                        description = if (playing) "Pausa" else "Reproducir",
-                        enabled = playlist.isNotEmpty(),
-                        primary = true
-                    ) { startOrToggle() }
-                    TransportButton(TransportGlyph.NEXT, "Siguiente", enabled = sending) {
-                        player.next()
-                    }
-                    TransportButton(
-                        glyph = TransportGlyph.LOOP,
-                        description = "Bucle",
-                        active = loop
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            // En landscape la imagen y la barra de reproducción quedan siempre a la
+            // vista, con la lista de archivos al costado, igual que en el monitor.
+            val landscape = maxWidth > maxHeight
+
+            /** Vista previa y barra de reproducción. */
+            val stage: @Composable (Modifier, Boolean) -> Unit = { modifier, fill ->
+                Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Box(
+                        modifier = (if (fill) {
+                            Modifier.weight(1f)
+                        } else {
+                            Modifier.aspectRatio(16f / 9f)
+                        })
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(Color.Black),
+                        contentAlignment = Alignment.Center
                     ) {
-                        loop = !loop
-                        player.setLooping(loop)
+                        val shot = preview
+                        val tick = previewTick
+                        if (shot != null) {
+                            AndroidView(
+                                factory = { ctx -> NdiVideoView(ctx) },
+                                update = { view -> if (tick >= 0) view.setFrame(shot) },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Text(
+                                "Sin vista previa",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = NdiGlass.Muted
+                            )
+                        }
                     }
-                }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    GlassChip("Girar $rotation°", rotation != 0) {
-                        rotation = (rotation + 90) % 360
-                        player.setExtraRotation(rotation)
+                    StatusPill(running = sending, text = status)
+                    if (duration > 0) {
+                        Slider(
+                            value = position.coerceIn(0, duration).toFloat(),
+                            onValueChange = { position = it.roundToInt() },
+                            onValueChangeFinished = { player.seekTo(position) },
+                            valueRange = 0f..duration.toFloat().coerceAtLeast(1f)
+                        )
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(clockText(position / 1000), fontSize = 10.sp, color = NdiGlass.Muted)
+                            Text(clockText(duration / 1000), fontSize = 10.sp, color = NdiGlass.Muted)
+                        }
                     }
-                    Text(
-                        "Anterior · detener · reproducir/pausa · siguiente · bucle. " +
-                            "La barra de posición salta a cualquier punto.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = NdiGlass.Muted,
-                        modifier = Modifier.weight(1f)
-                    )
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(
+                            10.dp,
+                            Alignment.CenterHorizontally
+                        ),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TransportButton(TransportGlyph.PREV, "Anterior", enabled = sending) {
+                            player.previous()
+                        }
+                        TransportButton(TransportGlyph.STOP, "Detener", enabled = sending) {
+                            stopAll()
+                        }
+                        TransportButton(
+                            glyph = if (playing) TransportGlyph.PAUSE else TransportGlyph.PLAY,
+                            description = if (playing) "Pausa" else "Reproducir",
+                            enabled = playlist.isNotEmpty(),
+                            primary = true
+                        ) { startOrToggle() }
+                        TransportButton(TransportGlyph.NEXT, "Siguiente", enabled = sending) {
+                            player.next()
+                        }
+                        TransportButton(
+                            glyph = TransportGlyph.LOOP,
+                            description = "Bucle",
+                            active = loop
+                        ) {
+                            loop = !loop
+                            player.setLooping(loop)
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        GlassChip("Girar $rotation°", rotation != 0) {
+                            rotation = (rotation + 90) % 360
+                            player.setExtraRotation(rotation)
+                        }
+                        Text(
+                            "Anterior · detener · reproducir/pausa · siguiente · bucle. " +
+                                "La barra de posición salta a cualquier punto.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NdiGlass.Muted,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
 
-            GlassPanel {
-                Text(
-                    "Lista de reproducción",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = NdiGlass.Text
-                )
-                Text(
-                    "Añade vídeos, fotos y audios: se emiten en orden por la misma fuente NDI. " +
-                        "El vídeo y el audio viajan sincronizados; las fotos duran 8 s.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = NdiGlass.Muted
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    PrimaryAction("Añadir archivos") {
-                        picker.launch(arrayOf("video/*", "image/*", "audio/*"))
-                    }
-                    if (playlist.isNotEmpty()) {
-                        PrimaryAction("Limpiar") {
-                            player.close()
-                            playlist = emptyList()
-                            current = -1
-                            sending = false
-                            playing = false
-                            position = 0
-                            duration = 0
-                            preview = null
-                            status = "Lista vacía"
+            val listPanel: @Composable () -> Unit = {
+                GlassPanel {
+                    Text(
+                        "Lista de reproducción",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = NdiGlass.Text
+                    )
+                    Text(
+                        "Añade vídeos, fotos y audios: se emiten en orden por la misma fuente NDI. " +
+                            "El vídeo y el audio viajan sincronizados; las fotos duran 8 s.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NdiGlass.Muted
+                    )
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        PrimaryAction("Añadir archivos", Modifier.weight(1f)) {
+                            picker.launch(arrayOf("video/*", "image/*", "audio/*"))
                         }
-                    }
-                }
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 240.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    playlist.forEachIndexed { index, item ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .glassSurface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    fillAlpha = if (index == current) 0.18f else 0.06f,
-                                    elevation = 2
-                                )
-                                .clickable {
-                                    if (sending) {
-                                        player.select(index)
-                                    } else {
-                                        bindPlayer()
-                                        sending = player.start(
-                                            playlist,
-                                            "NDI App Multimedia",
-                                            index
-                                        )
-                                        player.setExtraRotation(rotation)
-                                    }
-                                    current = index
-                                }
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                "${index + 1}.",
-                                fontSize = 11.sp,
-                                color = NdiGlass.Muted,
-                                modifier = Modifier.width(26.dp)
-                            )
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    item.name,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = NdiGlass.Text,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    when (item.kind) {
-                                        MediaKind.VIDEO -> "Vídeo"
-                                        MediaKind.IMAGE -> "Foto"
-                                        MediaKind.AUDIO -> "Audio"
-                                    },
-                                    fontSize = 10.sp,
-                                    color = NdiGlass.Muted
-                                )
+                        if (playlist.isNotEmpty()) {
+                            PrimaryAction("Limpiar", Modifier.weight(1f)) {
+                                player.close()
+                                playlist = emptyList()
+                                current = -1
+                                sending = false
+                                playing = false
+                                position = 0
+                                duration = 0
+                                preview = null
+                                status = "Lista vacía"
                             }
                         }
                     }
-                    if (playlist.isEmpty()) {
-                        Text(
-                            "La lista está vacía.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = NdiGlass.Muted
-                        )
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = if (landscape) 2000.dp else 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        playlist.forEachIndexed { index, item ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .glassSurface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        fillAlpha = if (index == current) 0.18f else 0.06f,
+                                        elevation = 2
+                                    )
+                                    .clickable {
+                                        if (sending) {
+                                            player.select(index)
+                                        } else {
+                                            bindPlayer()
+                                            sending = player.start(
+                                                playlist,
+                                                "NDI App Multimedia",
+                                                index
+                                            )
+                                            player.setExtraRotation(rotation)
+                                        }
+                                        current = index
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "${index + 1}.",
+                                    fontSize = 11.sp,
+                                    color = NdiGlass.Muted,
+                                    modifier = Modifier.width(26.dp)
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        item.name,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = NdiGlass.Text,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        when (item.kind) {
+                                            MediaKind.VIDEO -> "Vídeo"
+                                            MediaKind.IMAGE -> "Foto"
+                                            MediaKind.AUDIO -> "Audio"
+                                        },
+                                        fontSize = 10.sp,
+                                        color = NdiGlass.Muted
+                                    )
+                                }
+                            }
+                        }
+                        if (playlist.isEmpty()) {
+                            Text(
+                                "La lista está vacía.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = NdiGlass.Muted
+                            )
+                        }
                     }
+                }
+            }
+
+            if (landscape) {
+                Row(Modifier.fillMaxSize()) {
+                    GlassPanel(
+                        title = "Emisión",
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 6.dp)
+                    ) {
+                        stage(Modifier.fillMaxSize(), true)
+                    }
+                    Column(
+                        Modifier
+                            .width(380.dp)
+                            .fillMaxHeight()
+                            .verticalScroll(rememberScrollState())
+                            .padding(start = 6.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        listPanel()
+                    }
+                }
+            } else {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    GlassPanel(title = "Emisión") {
+                        stage(Modifier.fillMaxWidth(), false)
+                    }
+                    listPanel()
                 }
             }
         }
