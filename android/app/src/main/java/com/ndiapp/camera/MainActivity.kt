@@ -221,7 +221,7 @@ private fun setSystemBarsVisible(activity: Activity?, visible: Boolean) {
     }
 }
 
-private enum class Screen { CAMERA, SCREEN, MULTIMEDIA, UVC, AUDIO, MONITOR }
+private enum class Screen { CAMERA, SCREEN, MULTIMEDIA, UVC, AUDIO, MONITOR, SRT }
 
 /** Cámara USB conectada con la app ya abierta: lleva al visor de esa fuente. */
 private val usbAttachSignal = mutableIntStateOf(0)
@@ -290,8 +290,6 @@ private fun AppRoot() {
             MenuSheet(
                 screen = screen,
                 version = camera.version,
-                srtTxUrl = camera.srtTxUrl,
-                onSrtTxUrl = { url -> camera.setSrtTxUrl(url) },
                 onSelect = { target ->
                     screen = target
                     if (target == Screen.CAMERA) {
@@ -320,6 +318,11 @@ private fun AppRoot() {
                 Screen.UVC -> UvcTab(onMenu = { scope.launch { drawerState.open() } })
                 Screen.AUDIO -> AudioTab(onMenu = { scope.launch { drawerState.open() } })
                 Screen.MONITOR -> MonitorTab(onMenu = { scope.launch { drawerState.open() } })
+                Screen.SRT -> SrtTab(
+                    onMenu = { scope.launch { drawerState.open() } },
+                    srtUrl = camera.srtTxUrl,
+                    onSrtUrl = { url -> camera.setSrtTxUrl(url) }
+                )
             }
 
             // Con la cámara al aire el resto de la app sigue usable: este aviso
@@ -2457,8 +2460,6 @@ private fun VerticalZoom(
 private fun MenuSheet(
     screen: Screen,
     version: String,
-    srtTxUrl: String,
-    onSrtTxUrl: (String) -> Unit,
     onSelect: (Screen) -> Unit
 ) {
     ModalDrawerSheet(
@@ -2495,6 +2496,12 @@ private fun MenuSheet(
             Spacer(Modifier.height(12.dp))
 
             MenuEntry(
+                icon = DockIcon.HIDE,
+                title = "Monitor NDI",
+                subtitle = "Ver las fuentes NDI de la red",
+                selected = screen == Screen.MONITOR
+            ) { onSelect(Screen.MONITOR) }
+            MenuEntry(
                 icon = DockIcon.MIC,
                 title = "Cámara",
                 subtitle = "Transmitir la cámara como fuente NDI",
@@ -2513,24 +2520,23 @@ private fun MenuSheet(
                 selected = screen == Screen.MULTIMEDIA
             ) { onSelect(Screen.MULTIMEDIA) }
             MenuEntry(
-                icon = DockIcon.MEDIA,
-                title = "Cámara USB",
-                subtitle = "Captura UVC por USB como fuente NDI",
-                selected = screen == Screen.UVC
-            ) { onSelect(Screen.UVC) }
-            MenuEntry(
                 icon = DockIcon.MIC,
                 title = "Audio",
                 subtitle = "Micrófono o archivo como fuente de audio",
                 selected = screen == Screen.AUDIO
             ) { onSelect(Screen.AUDIO) }
             MenuEntry(
-                icon = DockIcon.HIDE,
-                title = "Monitor NDI",
-                subtitle = "Ver las fuentes NDI de la red",
-                selected = screen == Screen.MONITOR
-            ) { onSelect(Screen.MONITOR) }
-            OutboundPanel(srtUrl = srtTxUrl, onSrtUrl = onSrtTxUrl)
+                icon = DockIcon.MEDIA,
+                title = "Captura UVC",
+                subtitle = "Cámara USB como fuente NDI",
+                selected = screen == Screen.UVC
+            ) { onSelect(Screen.UVC) }
+            MenuEntry(
+                icon = DockIcon.SETTINGS,
+                title = "SRT",
+                subtitle = "URL de la salida SRT de la cámara",
+                selected = screen == Screen.SRT
+            ) { onSelect(Screen.SRT) }
             Spacer(Modifier.weight(1f))
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
             Spacer(Modifier.height(10.dp))
@@ -2550,7 +2556,7 @@ private fun MenuSheet(
 @Composable
 private fun OutboundPanel(srtUrl: String, onSrtUrl: (String) -> Unit) {
     var draft by remember(srtUrl) { mutableStateOf(srtUrl) }
-    Column(Modifier.fillMaxWidth().padding(top = 14.dp)) {
+    Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "Salida SRT",
@@ -4205,6 +4211,44 @@ private fun MediaTab(onMenu: () -> Unit) {
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------------- SRT ---
+
+/** Configuración de la salida SRT, en su propia pestaña del menú. */
+@Composable
+private fun SrtTab(onMenu: () -> Unit, srtUrl: String, onSrtUrl: (String) -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        TopBar(
+            modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
+            trailing = {
+                Text(
+                    "SRT",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = NdiGlass.Muted
+                )
+            },
+            onMenu = onMenu
+        )
+        Column(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            GlassPanel {
+                OutboundPanel(srtUrl = srtUrl, onSrtUrl = onSrtUrl)
+                Text(
+                    "El botón naranja del visor de la cámara arranca y corta la salida. " +
+                        "El estado del socket y los MB enviados se muestran sobre el visor.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NdiGlass.Muted
+                )
             }
         }
     }
