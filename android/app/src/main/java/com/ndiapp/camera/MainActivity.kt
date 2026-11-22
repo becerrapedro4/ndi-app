@@ -303,6 +303,22 @@ private fun localNetwork(context: Context): LocalNetwork {
     return LocalNetwork(wifi, address, MulticastLock.held)
 }
 
+
+/** Error de SRT con la pista de qué espera del otro lado. */
+private fun srtErrorMessage(message: String, url: String, context: Context): String {
+    if (!message.startsWith("SRT:")) return message
+    val listener = url.contains("mode=listener", ignoreCase = true)
+    val port = url.substringAfterLast(':', "").substringBefore('?').trim()
+    val net = localNetwork(context)
+    return if (listener) {
+        "$message · en vMix poné el input SRT en modo Caller hacia " +
+            "${net.address.ifBlank { "la IP del teléfono" }}:${port.ifBlank { "puerto" }}"
+    } else {
+        "$message · revisá que en vMix el input SRT esté en modo Listener " +
+            "en el puerto ${port.ifBlank { "de la URL" }}"
+    }
+}
+
 /** Muestra u oculta las barras del sistema para el visor a pantalla completa. */
 private fun setSystemBarsVisible(activity: Activity?, visible: Boolean) {
     val window = activity?.window ?: return
@@ -994,7 +1010,9 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
             srtTxStatus = ""
             srtTxDetail = ""
             srtTxRunning = false
-            srtTxNotice = message
+            // El aviso dice qué mirar del otro lado: casi siempre el modo del
+            // input SRT de vMix está al revés del que pide la URL.
+            srtTxNotice = srtErrorMessage(message, srtTxUrl, appContext)
             session.keepAudioForSrt = false
             session.releaseAudioCaptureIfIdle()
         }

@@ -29,6 +29,13 @@ class TsMuxer {
     private var psiCountdown = 0
     private var audio = false
 
+    /** Versión del PMT: cambia cuando aparece o desaparece una pista. */
+    private var version = 0
+
+    // La norma pide un PCR al menos cada 100 ms. Antes sólo iba en los cuadros
+    // clave (uno por segundo) y muchos receptores no enganchaban el programa.
+    private var lastPcrPts = -1L
+
     /** Devuelve los paquetes TS de una unidad de acceso completa. */
     @Synchronized
     fun encode(accessUnit: ByteArray, pts90k: Long, keyFrame: Boolean): ByteArray {
@@ -59,6 +66,9 @@ class TsMuxer {
     fun setAudio(enabled: Boolean) {
         if (audio == enabled) return
         audio = enabled
+        // Un PMT con la misma versión y otro contenido se descarta en el
+        // receptor: hay que subir la versión para que lo vuelva a leer.
+        version = (version + 1) and 0x1F
         psiCountdown = 0
     }
 
@@ -76,7 +86,7 @@ class TsMuxer {
         section[i++] = 0x0D                     // section_length = 13
         section[i++] = 0x00
         section[i++] = 0x01                     // transport_stream_id
-        section[i++] = 0xC1.toByte()            // versión 0, current_next 1
+        section[i++] = (0xC0 or (version shl 1) or 0x01).toByte()
         section[i++] = 0x00                     // section_number
         section[i++] = 0x00                     // last_section_number
         section[i++] = 0x00
@@ -97,7 +107,7 @@ class TsMuxer {
         section[i++] = (sectionLength and 0xFF).toByte()
         section[i++] = 0x00
         section[i++] = 0x01                     // program_number
-        section[i++] = 0xC1.toByte()            // versión 0, current_next 1
+        section[i++] = (0xC0 or (version shl 1) or 0x01).toByte()
         section[i++] = 0x00                     // section_number
         section[i++] = 0x00                     // last_section_number
         section[i++] = (0xE0 or (VIDEO_PID shr 8)).toByte()
@@ -157,6 +167,10 @@ class TsMuxer {
     }
 
     private fun writeVideo(data: ByteArray, pts: Long, keyFrame: Boolean) {
+        // PCR en el primer paquete de este cuadro si toca: cuadro clave, primer
+        // cuadro o pasaron 100 ms desde el anterior.
+        val withPcr = keyFrame || lastPcrPts < 0L || pts - lastPcrPts >= 9_000L
+        if (withPcr) lastPcrPts = pts
         // Cabecera PES de vídeo con PTS y DTS (la longitud se deja en cero).
         val header = 19
         val pes = ByteArray(header + data.size)
@@ -185,8 +199,8 @@ class TsMuxer {
             var offset = 4
             val payload: Int
             when {
-                // PCR en el primer paquete de cada cuadro clave.
-                first && keyFrame -> {
+                // PCR cuando toca: cuadro clave o cada 100 ms.
+                first && withPcr -> {
                     val room = PACKET - 12
                     payload = minOf(room, rest)
                     packet[3] = (0x30 or ccVideo).toByte()
