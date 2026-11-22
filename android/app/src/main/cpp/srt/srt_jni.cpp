@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <atomic>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -346,6 +347,44 @@ Java_com_ndiapp_camera_net_SrtNative_nativeWrite(JNIEnv *env, jobject, jlong han
     }
     env->ReleaseByteArrayElements(source, bytes, JNI_ABORT);
     return written;
+}
+
+// Estado real del socket y contadores del envio: dice en que etapa esta la
+// salida (conectando, conectado, roto) y si los paquetes salen y se confirman.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ndiapp_camera_net_SrtNative_nativeStats(JNIEnv *env, jobject, jlong handle) {
+    if (handle == 0) return env->NewStringUTF("");
+    auto socket = static_cast<SRTSOCKET>(handle);
+    const char *state = "desconocido";
+    switch (srt_getsockstate(socket)) {
+        case SRTS_INIT: state = "creado"; break;
+        case SRTS_OPENED: state = "abierto"; break;
+        case SRTS_LISTENING: state = "escuchando"; break;
+        case SRTS_CONNECTING: state = "conectando"; break;
+        case SRTS_CONNECTED: state = "conectado"; break;
+        case SRTS_BROKEN: state = "roto"; break;
+        case SRTS_CLOSING: state = "cerrando"; break;
+        case SRTS_CLOSED: state = "cerrado"; break;
+        case SRTS_NONEXIST: state = "inexistente"; break;
+        default: break;
+    }
+    size_t blocks = 0;
+    size_t bytes = 0;
+    srt_getsndbuffer(socket, &blocks, &bytes);
+    SRT_TRACEBSTATS stats;
+    std::memset(&stats, 0, sizeof(stats));
+    char text[512];
+    if (srt_bstats(socket, &stats, 0) != SRT_ERROR) {
+        std::snprintf(text, sizeof(text),
+                      "socket %s \u00b7 %.1f Mb/s \u00b7 %lld pkt \u00b7 %lld reenv\u00edos \u00b7 %d ms RTT \u00b7 cola %lu",
+                      state, stats.mbpsSendRate, static_cast<long long>(stats.pktSentTotal),
+                      static_cast<long long>(stats.pktRetransTotal),
+                      static_cast<int>(stats.msRTT), static_cast<unsigned long>(blocks));
+    } else {
+        std::snprintf(text, sizeof(text), "socket %s \u00b7 cola %lu",
+                      state, static_cast<unsigned long>(blocks));
+    }
+    return env->NewStringUTF(text);
 }
 
 extern "C" JNIEXPORT void JNICALL

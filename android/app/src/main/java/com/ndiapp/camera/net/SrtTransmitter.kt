@@ -29,6 +29,9 @@ class SrtTransmitter {
     /** Aviso que no corta el vídeo (por ejemplo, AAC no disponible). */
     var onWarning: ((String) -> Unit)? = null
 
+    /** Estado del socket y contadores del envío, una vez por segundo. */
+    var onDiagnostics: ((String) -> Unit)? = null
+
     @Volatile
     var running = false
         private set
@@ -101,7 +104,12 @@ class SrtTransmitter {
         muxer.setAudio(false)
         val gen = ++generation
         running = true
-        onStatus?.invoke("Conectando SRT…")
+        // El modo escucha puede tardar en recibir al emisor: el aviso lo dice
+        // en vez de dejar «Conectando…» sin explicación.
+        onStatus?.invoke(
+            if (listening(url)) "SRT escuchando en ${describe(url)} · esperando al emisor"
+            else "Conectando SRT a ${describe(url)}…"
+        )
         writer = Thread({ writerLoop(url.trim(), gen) }, "srt-tx").apply {
             isDaemon = true
             start()
@@ -254,7 +262,10 @@ class SrtTransmitter {
         }
         val socket = SrtNative.connect(url, 8000, sender = true)
         if (socket == 0L) {
-            finish(gen, "SRT: ${SrtNative.lastError()}")
+            val reason = SrtNative.lastError()
+            // Sin socket no hay contadores: queda anotado contra quién y por qué.
+            onDiagnostics?.invoke("${describe(url)} · sin socket: $reason")
+            finish(gen, "SRT: $reason")
             return
         }
         if (gen != generation) {
@@ -292,6 +303,11 @@ class SrtTransmitter {
                         val counted = frames
                         val rate = ((counted - windowFrames) * 1000f / elapsed).toInt()
                         onProgress?.invoke(mbps, rate)
+                        // Estado del socket y contadores reales de libsrt: dice
+                        // si el receptor lee, si hay reenvíos o si se rompió.
+                        SrtNative.stats(socket).takeIf { it.isNotBlank() }?.let { stats ->
+                            onDiagnostics?.invoke(stats)
+                        }
                         windowFrames = counted
                         if (!noImageWarned && counted == 0 && now - connectedAt >= 3000) {
                             // Conectado y sin un solo cuadro codificado: se dice,
@@ -320,6 +336,16 @@ class SrtTransmitter {
             }
         }
     }
+
+    /** Host y puerto de la URL, para que el aviso diga contra quién se emite. */
+    private fun describe(url: String): String {
+        val hostPort = url.trim().removePrefix("srt://").substringBefore('?').substringBefore('/')
+        return hostPort.ifBlank { "?" }
+    }
+
+    /** La URL pide esperar al receptor (?mode=listener). */
+    private fun listening(url: String): Boolean =
+        url.substringAfter('?', "").split('&').any { it.equals("mode=listener", true) }
 
     /** Fallo antes de conectar: se informa y se cierra la emisión. */
     private fun finish(gen: Int, message: String) {

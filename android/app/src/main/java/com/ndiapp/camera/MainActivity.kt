@@ -440,6 +440,8 @@ private class CameraUi(appContext: Context) {
     var srtTxStatus by mutableStateOf("")
     // Caudal real y errores de la salida SRT, para no emitir a ciegas.
     var srtTxDetail by mutableStateOf("")
+    // Estado del socket y contadores de envío: dice en qué etapa se corta.
+    var srtTxDiag by mutableStateOf("")
     var srtTxNotice by mutableStateOf<String?>(null)
 
     init {
@@ -853,6 +855,7 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
         srtTxRunning = false
         srtTxStatus = ""
         srtTxDetail = ""
+        srtTxDiag = ""
         session.keepAudioForSrt = false
         session.releaseAudioCaptureIfIdle()
         return
@@ -868,6 +871,7 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
     session.keepAudioForSrt = true
     session.ensureAudioCapture()
     srtTxDetail = ""
+    srtTxDiag = ""
     srtTxNotice = null
     srtTx.onStatus = { message ->
         Handler(Looper.getMainLooper()).post { srtTxStatus = message }
@@ -887,8 +891,16 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
     }
     srtTx.onProgress = { mbps, rate ->
         Handler(Looper.getMainLooper()).post {
-            srtTxDetail = String.format(java.util.Locale.US, "%.1f Mb/s · %d fps", mbps, rate)
+            // Los MB son los bytes que el socket ya confirmó: si suben, el
+            // receptor está recibiendo; si no, el corte es de red o de libsrt.
+            val mb = srtTx.sentBytes / 1_000_000f
+            srtTxDetail = String.format(
+                java.util.Locale.US, "%.1f Mb/s · %d fps · %.1f MB", mbps, rate, mb
+            )
         }
+    }
+    srtTx.onDiagnostics = { message ->
+        Handler(Looper.getMainLooper()).post { srtTxDiag = message }
     }
     srtTx.onStopped = {
         Handler(Looper.getMainLooper()).post {
@@ -1140,21 +1152,36 @@ private fun CameraScreen(
             )
         }
 
-        // Salida SRT: dice si conectó, el caudal real o el motivo del fallo.
-        if (camera.srtTxRunning || camera.srtTxStatus.isNotBlank()) {
-            StatusPill(
-                running = camera.srtTxRunning,
-                text = buildString {
-                    append(camera.srtTxStatus.ifBlank { "SRT" })
-                    if (camera.srtTxDetail.isNotBlank()) {
-                        append(" · ").append(camera.srtTxDetail)
-                    }
-                },
+        // Salida SRT: dice si conectó, el caudal real o el motivo del fallo, y
+        // debajo el estado del socket con los contadores del envío.
+        if (camera.srtTxRunning || camera.srtTxStatus.isNotBlank() ||
+            camera.srtTxDiag.isNotBlank()
+        ) {
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(start = 12.dp, top = 54.dp)
-            )
+                    .padding(start = 12.dp, top = 54.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                StatusPill(
+                    running = camera.srtTxRunning,
+                    text = buildString {
+                        append(camera.srtTxStatus.ifBlank { "SRT" })
+                        if (camera.srtTxDetail.isNotBlank()) {
+                            append(" · ").append(camera.srtTxDetail)
+                        }
+                    },
+                    modifier = Modifier.widthIn(max = 340.dp)
+                )
+                if (camera.srtTxDiag.isNotBlank()) {
+                    StatusPill(
+                        running = camera.srtTxRunning,
+                        text = camera.srtTxDiag,
+                        modifier = Modifier.widthIn(max = 340.dp)
+                    )
+                }
+            }
         }
 
         // Un toque enfoca ese punto; doble toque muestra u oculta los controles.

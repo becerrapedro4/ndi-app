@@ -44,10 +44,17 @@ object SrtNative {
 
     fun lastError(): String = if (loaded) nativeLastError() else "libsrt no disponible"
 
+    /**
+     * Estado del socket y contadores de envío (paquetes, reenvíos, RTT y cola).
+     * Se muestra en pantalla para saber en qué etapa se corta la salida.
+     */
+    fun stats(handle: Long): String = if (loaded && handle != 0L) nativeStats(handle) else ""
+
     private external fun nativeConnect(url: String, timeoutMs: Int, sender: Boolean): Long
     private external fun nativeRead(handle: Long, buffer: ByteArray, offset: Int, length: Int): Int
     private external fun nativeWrite(handle: Long, buffer: ByteArray, offset: Int, length: Int): Int
     private external fun nativeClose(handle: Long)
     private external fun nativeCancel()
     private external fun nativeLastError(): String
+    private external fun nativeStats(handle: Long): String
 }
