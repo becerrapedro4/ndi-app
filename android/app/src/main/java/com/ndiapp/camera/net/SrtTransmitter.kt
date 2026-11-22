@@ -71,6 +71,17 @@ class SrtTransmitter {
     @Volatile
     private var frames = 0
 
+    /** Cuadros que llegaron al codificador, salgan o no. */
+    @Volatile
+    private var submitted = 0
+
+    /** Formato de color con el que se intenta codificar; se prueba el otro si no sale. */
+    @Volatile
+    private var preferSemiPlanar = true
+
+    @Volatile
+    private var videoRetried = false
+
     // El sensor entrega tiempos del sistema (ns) y el receptor espera un reloj
     // que empiece cerca de cero: se resta el primero y nunca se retrocede.
     // Lo lee también el hilo del micrófono para alinear el audio.
@@ -95,6 +106,9 @@ class SrtTransmitter {
         dropped = 0
         sentBytes = 0
         frames = 0
+        submitted = 0
+        preferSemiPlanar = true
+        videoRetried = false
         ptsBase = -1L
         lastPts = 0L
         realtimeBaseUs = -1L
@@ -120,7 +134,9 @@ class SrtTransmitter {
         if (!running || !connected) return
         if (frame.width <= 0 || frame.height <= 0) return
         ensureEncoder(frame.width, frame.height)
-        encoder?.submit(frame)
+        val current = encoder ?: return
+        submitted++
+        current.submit(frame)
     }
 
     /**
@@ -161,7 +177,7 @@ class SrtTransmitter {
             height >= 720 -> 4_000_000
             else -> 2_500_000
         }
-        val created = runCatching { H264Encoder(width, height, fps, bitrate, true) }
+        val created = runCatching { H264Encoder(width, height, fps, bitrate, preferSemiPlanar) }
             .recoverCatching { H264Encoder(width, height, fps, bitrate, false) }
             .getOrElse { error ->
                 onError?.invoke("Codificador no disponible: ${error.message}")
@@ -309,12 +325,23 @@ class SrtTransmitter {
                             onDiagnostics?.invoke(stats)
                         }
                         windowFrames = counted
+                        // Llegan cuadros al codificador y no sale ninguno: en
+                        // varios equipos el formato de color elegido no sirve.
+                        // Se reintenta una vez con el otro antes de avisar.
+                        if (!videoRetried && submitted > 0 && counted == 0) {
+                            videoRetried = true
+                            preferSemiPlanar = !preferSemiPlanar
+                            releaseEncoder()
+                        }
                         if (!noImageWarned && counted == 0 && now - connectedAt >= 3000) {
                             // Conectado y sin un solo cuadro codificado: se dice,
                             // en vez de dejar la salida en 0 fps sin explicación.
                             noImageWarned = true
+                            val detail = encoder?.lastError.orEmpty()
                             onWarning?.invoke(
-                                "SRT conectado, pero la cámara no entrega imagen al codificador"
+                                "SRT conectado, pero el codificador no entrega imagen " +
+                                    "($submitted cuadros recibidos, 0 codificados)" +
+                                    if (detail.isBlank()) "" else " · $detail"
                             )
                         }
                     }

@@ -56,6 +56,11 @@ class H264Encoder(
     var isRunning = false
         private set
 
+    /** Último fallo al cargar un cuadro, para poder mostrarlo en pantalla. */
+    @Volatile
+    var lastError: String = ""
+        private set
+
     init {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
         format.setInteger(
@@ -103,6 +108,7 @@ class H264Encoder(
             codec.queueInputBuffer(index, 0, frameSize, frame.timestampNs / 1000, 0)
             drain()
         } catch (t: Throwable) {
+            lastError = t.javaClass.simpleName + ": " + (t.message ?: "")
             Log.w(TAG, "No se pudo codificar el cuadro", t)
         }
     }

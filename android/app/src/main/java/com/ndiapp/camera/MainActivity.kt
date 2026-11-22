@@ -2090,9 +2090,11 @@ private fun StreamButton(
         }
         Spacer(Modifier.height(3.dp))
         Text(
-            if (streaming) "Detener" else "Streaming",
+            if (streaming) "Detener" else "Emitir",
             fontSize = if (wide) 10.sp else 9.sp,
             fontWeight = if (streaming) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            softWrap = false,
             color = if (streaming) NdiGlass.BlueBright else Color.White.copy(alpha = 0.72f)
         )
     }
@@ -2142,6 +2144,8 @@ private fun TxButton(
             if (active) "Detener" else "Enviar",
             fontSize = if (wide) 10.sp else 9.sp,
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            softWrap = false,
             color = if (active) accent else Color.White.copy(alpha = 0.72f)
         )
     }
