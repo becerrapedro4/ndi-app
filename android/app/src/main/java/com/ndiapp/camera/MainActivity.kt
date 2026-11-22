@@ -449,7 +449,7 @@ private fun AppRoot() {
 
             // Con la cámara al aire el resto de la app sigue usable: este aviso
             // recuerda qué se está emitiendo y vuelve al visor con un toque.
-            if (screen != Screen.CAMERA && !pipActive.value &&
+            if (screen != Screen.CAMERA && !pipActive.value && !monitorClean.value &&
                 (camera.running || camera.srtTxRunning)
             ) {
                 LivePill(
@@ -474,6 +474,9 @@ private fun AppRoot() {
 
 /** La app está en ventana flotante (picture-in-picture) mostrando el monitor. */
 private val pipActive = mutableStateOf(false)
+
+/** El monitor está en vista limpia: no se superpone ningún aviso de emisión. */
+private val monitorClean = mutableStateOf(false)
 
 /**
  * Aviso flotante de emisión: se muestra sobre las demás pestañas mientras la
@@ -3326,6 +3329,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
     }
     // La vista limpia deja solo la imagen: un aviso breve recuerda cómo salir.
     LaunchedEffect(clean) {
+        monitorClean.value = clean
         if (!clean) {
             cleanHint = false
             return@LaunchedEffect
@@ -3359,6 +3363,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
     }
     DisposableEffect(Unit) {
         onDispose {
+            monitorClean.value = false
             receiver.stop()
             SrtNative.cancel()
             player?.release()
