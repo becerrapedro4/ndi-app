@@ -4701,6 +4701,42 @@ private fun UvcTab(onMenu: () -> Unit) {
     var active by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Conecta una cámara USB al teléfono") }
     val preview = remember { UvcPreview() }
+    val prefs = remember { context.getSharedPreferences("ndi_uvc", Context.MODE_PRIVATE) }
+    // Altura pedida a la cámara: se guarda y se aplica al reabrir el flujo.
+    var uvcHeight by remember { mutableIntStateOf(prefs.getInt("height", 720)) }
+
+    // libuvc necesita el permiso de cámara además del de USB, así que se pide primero.
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            status = "Sin permiso de cámara no se puede abrir la USB: concédelo en Ajustes"
+        }
+    }
+
+    fun ensureCameraPermission(): Boolean {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+            status = "Concede el permiso de cámara y vuelve a pulsar Emitir"
+        }
+        return granted
+    }
+
+    fun startCamera(target: UvcCamera) {
+        if (!ensureCameraPermission()) return
+        if (!target.hasPermission) {
+            UvcCameras.requestPermission(context, target, usbAction)
+            status = "Concede el permiso USB y vuelve a pulsar Emitir"
+            return
+        }
+        source.onStatus = { status = it }
+        val started = source.start(target, "NDI App UVC (${target.product})", uvcHeight)
+        active = if (started) target.deviceName else null
+        if (!started) preview.clear()
+        if (!started && status.isEmpty()) status = "No se pudo emitir la cámara"
+    }
 
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
@@ -4740,10 +4776,7 @@ private fun UvcTab(onMenu: () -> Unit) {
     LaunchedEffect(cameras) {
         val only = cameras.singleOrNull() ?: return@LaunchedEffect
         if (active != null || !only.hasPermission) return@LaunchedEffect
-        source.onStatus = { status = it }
-        val started = source.start(only, "NDI App UVC (${only.product})")
-        active = if (started) only.deviceName else null
-        if (!started) preview.clear()
+        startCamera(only)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -4758,6 +4791,41 @@ private fun UvcTab(onMenu: () -> Unit) {
             },
             onMenu = onMenu
         )
+
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 14.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Resolución",
+                style = MaterialTheme.typography.labelSmall,
+                color = NdiGlass.Muted
+            )
+            listOf(480, 576, 720, 1080).forEach { value ->
+                GlassChip("${value}p", uvcHeight == value) {
+                    if (uvcHeight != value) {
+                        uvcHeight = value
+                        prefs.edit().putInt("height", value).apply()
+                        val current = cameras.firstOrNull { it.deviceName == active }
+                        if (current != null) {
+                            // Se reabre para negociar el nuevo tamaño con la cámara.
+                            source.stop()
+                            preview.clear()
+                            startCamera(current)
+                        }
+                    }
+                }
+            }
+            Text(
+                "La cámara usa el tamaño más cercano que informe",
+                style = MaterialTheme.typography.labelSmall,
+                color = NdiGlass.Muted
+            )
+        }
 
         Column(
             Modifier
@@ -4815,8 +4883,9 @@ private fun UvcTab(onMenu: () -> Unit) {
                     color = NdiGlass.Text
                 )
                 Text(
-                    "Se capturan las cámaras que exponen la clase de vídeo USB: se negocia " +
-                        "MJPEG (o YUY2), se leen por bulk o isocrono y se emiten por NDI.",
+                    "Captura con libuvc: sirve tanto para cámaras y capturadoras que emiten " +
+                        "por endpoints isocronos como para las que sólo tienen bulk. libuvc " +
+                        "negocia MJPEG (o YUY2) y entrega el cuadro ya en RGBA para NDI.",
                     style = MaterialTheme.typography.bodySmall,
                     color = NdiGlass.Muted
                 )
@@ -4857,12 +4926,16 @@ private fun UvcTab(onMenu: () -> Unit) {
                         }
                         GlassChip("Permiso", camera.hasPermission, true) {
                             if (!camera.hasPermission) {
-                                status = if (
-                                    UvcCameras.requestPermission(context, camera, usbAction)
-                                ) {
-                                    "Acepta el permiso USB para la cámara"
+                                if (!ensureCameraPermission()) {
+                                    status = "Concede el permiso de cámara para capturar la USB"
                                 } else {
-                                    "No se pudo pedir el permiso USB"
+                                    status = if (
+                                        UvcCameras.requestPermission(context, camera, usbAction)
+                                    ) {
+                                        "Acepta el permiso USB para la cámara"
+                                    } else {
+                                        "No se pudo pedir el permiso USB"
+                                    }
                                 }
                             }
                         }
@@ -4876,20 +4949,8 @@ private fun UvcTab(onMenu: () -> Unit) {
                                 active = null
                                 preview.clear()
                                 status = "Cámara detenida"
-                            } else if (!camera.hasPermission) {
-                                UvcCameras.requestPermission(context, camera, usbAction)
-                                status = "Concede el permiso USB y vuelve a pulsar Emitir"
                             } else {
-                                source.onStatus = { status = it }
-                                val started = source.start(
-                                    camera,
-                                    "NDI App UVC (${camera.product})"
-                                )
-                                active = if (started) camera.deviceName else null
-                                if (!started) preview.clear()
-                                if (!started && status.isEmpty()) {
-                                    status = "No se pudo emitir la cámara"
-                                }
+                                startCamera(camera)
                             }
                         }
                     }

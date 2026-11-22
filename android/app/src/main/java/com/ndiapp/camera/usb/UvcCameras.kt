@@ -24,9 +24,10 @@ data class UvcCamera(
 object UvcCameras {
 
     private fun isVideoDevice(device: UsbDevice): Boolean =
-        (0 until device.interfaceCount).any { index ->
-            device.getInterface(index).interfaceClass == UsbConstants.USB_CLASS_VIDEO
-        }
+        device.deviceClass == UsbConstants.USB_CLASS_VIDEO ||
+            (0 until device.interfaceCount).any { index ->
+                device.getInterface(index).interfaceClass == UsbConstants.USB_CLASS_VIDEO
+            }
 
     fun list(context: Context): List<UvcCamera> {
         val manager = context.getSystemService(Context.USB_SERVICE) as? UsbManager

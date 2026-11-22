@@ -44,6 +44,14 @@ Código propio bajo licencia MIT (ver [LICENSE](LICENSE)). Las dependencias mant
 
 - **NDI SDK**: propietario de Vizrt NDI AB, no incluido en el repositorio.
 - AndroidX, CameraX y Compose: Apache License 2.0.
+- **UVCAndroid 1.0.13** (`android/app/libs/UVCAndroid-1.0.13-feedwatch.aar`), la
+  captura UVC a través de libuvc: Apache License 2.0. Incluye **libuvc** (BSD),
+  **libjpeg-turbo** y **libyuv** (BSD) y **libusb 1.0** bajo LGPL 2.1, compilada
+  como `libusb1.0.so` aparte para que se pueda reemplazar. El AAR es la variante
+  con los parches de payloads bulk y UVC 1.5 de
+  [daubli/UVCAndroid](https://github.com/daubli/UVCAndroid), rama
+  `fix/bulk-payload-reassembly`, SHA-256
+  `9d782f95016fc12dd0f193e7fac04aec9536361587aaa946b1fb47f76551ed1f`.
 
 NDI® es una marca registrada de Vizrt NDI AB. Este proyecto no está afiliado ni respaldado por
 Vizrt NDI AB.

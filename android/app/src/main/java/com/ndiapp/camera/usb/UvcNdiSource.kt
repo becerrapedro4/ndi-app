@@ -18,7 +18,7 @@ class UvcNdiSource(private val context: Context) {
     val isRunning: Boolean
         get() = streamer != null
 
-    fun start(camera: UvcCamera, name: String): Boolean {
+    fun start(camera: UvcCamera, name: String, preferredHeight: Int = 720): Boolean {
         stop()
         if (!NdiNative.init()) {
             onStatus?.invoke("El runtime de NDI no está disponible")
@@ -32,6 +32,7 @@ class UvcNdiSource(private val context: Context) {
         val capture = UvcStreamer(
             context = context,
             camera = camera,
+            preferredHeight = preferredHeight,
             onFrame = { rgba, width, height, fps ->
                 created.sendVideo(rgba, width, height, fps)
                 onPreview?.invoke(rgba, width, height)

@@ -1,96 +1,113 @@
 package com.ndiapp.camera.usb
 
 import android.content.Context
-import android.graphics.BitmapFactory
-import android.hardware.usb.UsbConstants
-import android.hardware.usb.UsbDeviceConnection
-import android.hardware.usb.UsbEndpoint
-import android.hardware.usb.UsbInterface
+import android.graphics.PixelFormat
+import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.hardware.usb.UsbRequest
+import android.media.ImageReader
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
-import java.io.ByteArrayOutputStream
+import com.serenegiant.usb.IFrameCallback
+import com.serenegiant.usb.Size
+import com.serenegiant.usb.USBException
+import com.serenegiant.usb.USBMonitor
+import com.serenegiant.usb.UVCCamera
 import java.nio.ByteBuffer
-
-/** Conversión YUY2 (UVC sin comprimir de 16 bpp) a RGBA. */
-object UvcYuv {
-
-    fun yuy2ToRgba(source: ByteArray, width: Int, height: Int): ByteArray {
-        val output = ByteArray(width * height * 4)
-        val pairs = (width * height) / 2
-        var read = 0
-        var write = 0
-        for (index in 0 until pairs) {
-            if (read + 3 >= source.size || write + 7 >= output.size) break
-            val y0 = source[read].toInt() and 0xFF
-            val u = (source[read + 1].toInt() and 0xFF) - 128
-            val y1 = source[read + 2].toInt() and 0xFF
-            val v = (source[read + 3].toInt() and 0xFF) - 128
-            writePixel(output, write, y0, u, v)
-            writePixel(output, write + 4, y1, u, v)
-            read += 4
-            write += 8
-        }
-        return output
-    }
-
-    private fun writePixel(output: ByteArray, offset: Int, y: Int, u: Int, v: Int) {
-        val c = (y - 16).coerceAtLeast(0)
-        output[offset] = (((298 * c + 409 * v + 128) shr 8).coerceIn(0, 255)).toByte()
-        output[offset + 1] = (((298 * c - 100 * u - 208 * v + 128) shr 8).coerceIn(0, 255)).toByte()
-        output[offset + 2] = (((298 * c + 516 * u + 128) shr 8).coerceIn(0, 255)).toByte()
-        output[offset + 3] = 0xFF.toByte()
-    }
-}
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Captura real de una cámara UVC: reclama la interfaz de streaming, negocia
- * formato con Probe/Commit, lee del endpoint (bulk si existe, si no isocrono),
- * rearma los frames con la cabecera de payload UVC y los entrega en RGBA.
+ * Captura de una cámara UVC a través de libuvc (UVCAndroid).
+ *
+ * libuvc habla UVC en C, con libusb: maneja tanto endpoints isocronos (lo habitual
+ * en las capturadoras y webcams) como los que sólo tienen bulk, y convierte MJPEG,
+ * YUY2 y compañía a RGBA en la parte nativa. La implementación anterior encolaba
+ * lecturas isocronas con `UsbRequest` desde Java y el kernel las rechazaba en
+ * estas cámaras, así que nunca llegaba imagen.
+ *
+ * Abrir y cerrar están serializados en un solo hilo, y el hilo principal nunca
+ * espera al dispositivo.
  */
 class UvcStreamer(
     private val context: Context,
     private val camera: UvcCamera,
+    private val preferredHeight: Int,
     private val onFrame: (rgba: ByteArray, width: Int, height: Int, fps: Int) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
 
     companion object {
         private const val TAG = "UvcStreamer"
-        private const val PROBE_CONTROL = 0x01
-        private const val COMMIT_CONTROL = 0x02
-        private const val GET_CUR = 0x81
-        private const val SET_CUR = 0x01
-        private const val ISOC_REQUESTS = 12
-        private const val MAX_FRAME_BYTES = 4 * 1024 * 1024
+        private const val OPEN_TIMEOUT_MS = 15_000L
+        private const val CLOSE_TIMEOUT_MS = 3_000L
+
+        /**
+         * Un único hilo para abrir y cerrar todas las cámaras: al cambiar de
+         * resolución, la nueva espera a que la anterior suelte el dispositivo.
+         */
+        private val DEVICE_THREAD = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "uvc-device").apply { isDaemon = true }
+        }
     }
 
-    /** Cómo terminó un intento de lectura isocrona. */
-    private enum class IsoStart { STREAMED, QUEUE_FAILED, INIT_FAILED, NO_DATA }
-
-    private var connection: UsbDeviceConnection? = null
-    private var thread: Thread? = null
-    private var interfaceUsed: UsbInterface? = null
+    private var monitor: USBMonitor? = null
+    private var cameraThread: HandlerThread? = null
+    private var cameraHandler: Handler? = null
+    private var opened: UVCCamera? = null
+    private var previewSink: ImageReader? = null
+    private var controlBlock: USBMonitor.UsbControlBlock? = null
+    private val deviceLatch = CountDownLatch(1)
+    private val openError = AtomicReference<Exception?>(null)
 
     @Volatile
     private var running = false
 
-    private var formatKind = UvcFormatKind.MJPEG
-    private var streamFps = 30
-    private var frameWidth = 0
-    private var frameHeight = 0
-    private var isBulk = false
-    private var bufferSize = 0
-    private var altSetting = 0
-    private var interfaceReady = false
-    private var lastEmit = 0L
+    @Volatile
+    private var capturing = false
 
-    private val frameBuffer = ByteArrayOutputStream(512 * 1024)
-    private var lastFid = -1
+    private var reusable = ByteArray(0)
 
     val isRunning: Boolean
         get() = running
 
+    private val listener = object : USBMonitor.OnDeviceConnectListener {
+        override fun onAttach(device: UsbDevice) = Unit
+
+        override fun onDetach(device: UsbDevice) = Unit
+
+        override fun onDeviceOpen(
+            device: UsbDevice,
+            ctrlBlock: USBMonitor.UsbControlBlock,
+            createNew: Boolean
+        ) {
+            controlBlock = ctrlBlock
+            deviceLatch.countDown()
+        }
+
+        override fun onDeviceClose(
+            device: UsbDevice,
+            ctrlBlock: USBMonitor.UsbControlBlock
+        ) = Unit
+
+        override fun onCancel(device: UsbDevice) {
+            openError.compareAndSet(null, IllegalStateException("No se concedió el permiso USB"))
+            deviceLatch.countDown()
+        }
+
+        override fun onError(device: UsbDevice, e: USBException) {
+            openError.compareAndSet(null, e)
+            deviceLatch.countDown()
+        }
+    }
+
+    /**
+     * Empieza a abrir la cámara en segundo plano. Devuelve false sólo si la cámara
+     * no está conectada; los fallos de apertura se informan por `onStatus`.
+     */
     fun start(): Boolean {
         if (running) return true
         val manager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
@@ -98,515 +115,185 @@ class UvcStreamer(
         val device = manager.deviceList.values
             .firstOrNull { it.deviceName == camera.deviceName }
             ?: return fail("La cámara no está conectada")
-        if (!manager.hasPermission(device)) return fail("Falta el permiso de acceso USB")
-
-        val conn = manager.openDevice(device) ?: return fail("No se pudo abrir la cámara")
-        connection = conn
-
-        val raw = runCatching { conn.rawDescriptors }.getOrNull()
-        if (raw == null || raw.isEmpty()) {
-            conn.close()
-            connection = null
-            return fail("No se pudieron leer los descriptores USB")
-        }
-        val topology = UvcDescriptors.parse(raw)
-        if (topology == null) {
-            conn.close()
-            connection = null
-            return fail("La cámara no anuncia formatos UVC compatibles")
-        }
-
-        val format = topology.bestFormat()
-        val frame = format?.let { topology.bestFrame(it) }
-        if (format == null || frame == null) {
-            conn.close()
-            connection = null
-            return fail("La cámara no ofrece resoluciones utilizables")
-        }
-        formatKind = format.kind
-        frameWidth = frame.width
-        frameHeight = frame.height
-
-        var chosenInterface: UsbInterface? = null
-        var chosenEndpoint: UsbEndpoint? = null
-        var chosenBulk = false
-        // Cada alt setting con su endpoint: si uno no entrega imagen se prueba el otro.
-        val isoAlternates = mutableListOf<Pair<UsbInterface, UsbEndpoint>>()
-        for (index in 0 until device.interfaceCount) {
-            val candidate = device.getInterface(index)
-            if (candidate.id != topology.streamingInterface || candidate.alternateSetting == 0) {
-                continue
-            }
-            var bestEndpoint: UsbEndpoint? = null
-            for (endpointIndex in 0 until candidate.endpointCount) {
-                val endpoint = candidate.getEndpoint(endpointIndex)
-                if (endpoint.direction != UsbConstants.USB_DIR_IN) continue
-                val type = endpoint.type
-                if (type != UsbConstants.USB_ENDPOINT_XFER_ISOC &&
-                    type != UsbConstants.USB_ENDPOINT_XFER_BULK
-                ) {
-                    continue
-                }
-                if (bestEndpoint == null || endpoint.maxPacketSize > bestEndpoint.maxPacketSize) {
-                    bestEndpoint = endpoint
-                }
-            }
-            val endpoint = bestEndpoint ?: continue
-            if (endpoint.type == UsbConstants.USB_ENDPOINT_XFER_ISOC) {
-                isoAlternates.add(candidate to endpoint)
-            }
-            val bulk = endpoint.type == UsbConstants.USB_ENDPOINT_XFER_BULK
-            val current = chosenEndpoint
-            val better = when {
-                current == null -> true
-                bulk && !chosenBulk -> true
-                bulk == chosenBulk && endpoint.maxPacketSize > current.maxPacketSize -> true
-                else -> false
-            }
-            if (better) {
-                chosenInterface = candidate
-                chosenEndpoint = endpoint
-                chosenBulk = bulk
-            }
-        }
-
-        val streamInterface = chosenInterface
-        val endpoint = chosenEndpoint
-        if (streamInterface == null || endpoint == null) {
-            conn.close()
-            connection = null
-            return fail("La cámara no expone un endpoint de vídeo utilizable")
-        }
-        isBulk = chosenBulk
-        isoAlternates.sortByDescending { it.second.maxPacketSize }
-
-        if (!conn.claimInterface(streamInterface, true)) {
-            conn.close()
-            connection = null
-            return fail("No se pudo reclamar la interfaz de vídeo")
-        }
-        interfaceUsed = streamInterface
-
-        val maxPayload = try {
-            negotiate(conn, topology, format, frame)
-        } catch (t: Throwable) {
-            Log.w(TAG, "Negociación UVC fallida", t)
-            conn.releaseInterface(streamInterface)
-            conn.close()
-            connection = null
-            return fail(t.message ?: "La cámara rechazó el formato elegido")
-        }
-
-        altSetting = streamInterface.alternateSetting
-        interfaceReady = conn.setInterface(streamInterface)
-        if (!interfaceReady) {
-            Log.w(TAG, "setInterface devolvió false; se intenta emitir igualmente")
-        }
-
-        if (isBulk) {
-            bufferSize = (if (maxPayload > 0) maxPayload else 64 * 1024).coerceIn(1024, 1 shl 20)
-        } else {
-            val packet = endpoint.maxPacketSize and 0x7FF
-            bufferSize = if (packet > 0) packet else (endpoint.maxPacketSize and 0xFFFF).coerceAtLeast(1024)
-        }
-
         running = true
-        val worker = Thread {
-            try {
-                if (isBulk) runBulk(conn, endpoint) else runIsochronous(conn, isoAlternates)
-            } catch (t: Throwable) {
-                if (running) {
-                    Log.w(TAG, "Lectura UVC interrumpida", t)
-                    onStatus("Se perdió la cámara: ${t.message}")
-                }
-            }
+        monitor = USBMonitor(context, listener, Handler(Looper.getMainLooper())).also {
+            it.register()
         }
-        worker.name = "uvc-capture"
-        worker.priority = Thread.MAX_PRIORITY
-        thread = worker
-        worker.start()
-
-        onStatus(
-            "${if (formatKind == UvcFormatKind.MJPEG) "MJPEG" else "YUY2"} " +
-                "$frameWidth×$frameHeight @ ${streamFps} fps · " +
-                "${if (isBulk) "bulk" else "isocrono"}"
-        )
+        DEVICE_THREAD.execute { openDevice(device) }
         return true
     }
 
     fun stop() {
         running = false
-        runCatching { connection?.close() }
-        thread?.let { runCatching { it.join(900) } }
-        thread = null
-        interfaceUsed = null
-        connection = null
+        capturing = false
+        DEVICE_THREAD.execute { release() }
     }
 
-    private fun runBulk(conn: UsbDeviceConnection, endpoint: UsbEndpoint) {
-        val buffer = ByteArray(bufferSize)
-        while (running) {
-            val read = runCatching { conn.bulkTransfer(endpoint, buffer, buffer.size, 500) }
-                .getOrDefault(-1)
-            if (read <= 0) {
-                if (!running) break
-                continue
-            }
-            handlePacket(buffer, read, isIsochronous = false)
+    private fun openDevice(device: UsbDevice) {
+        if (!running) return
+        val current = monitor ?: return
+        // Con el permiso ya concedido, la librería entrega el bloque de control al
+        // instante; si no, muestra su diálogo y responde por el mismo callback.
+        current.requestPermission(device)
+
+        if (!deviceLatch.await(OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            openError.compareAndSet(null, IllegalStateException("La cámara no abrió a tiempo"))
         }
-    }
-
-    /**
-     * Lectura isocrona. El kernel arma los paquetes dividiendo el buffer entre el
-     * wMaxPacketSize crudo del descriptor, así que un tamaño que no sea múltiplo
-     * suyo se rechaza al encolar (era el caso de los 1024 B con alt 3). Se prueban
-     * varios tamaños y, si un alt setting no entrega imagen, se pasa al siguiente.
-     */
-    private fun runIsochronous(
-        conn: UsbDeviceConnection,
-        alternates: List<Pair<UsbInterface, UsbEndpoint>>
-    ) {
-        var detail = "la cámara no expone un endpoint isocrono utilizable"
-        for ((iface, endpoint) in alternates) {
-            if (!running) return
-            if (!conn.setInterface(iface)) {
-                detail = "el teléfono no activó el alt ${iface.alternateSetting}"
-                continue
-            }
-            altSetting = iface.alternateSetting
-            interfaceReady = true
-            val sizes = isocSizes(endpoint)
-            for (size in sizes) {
-                if (!running) return
-                Log.i(TAG, "Isoc alt ${iface.alternateSetting}: pruebo $size B")
-                when (pumpIsochronous(conn, endpoint, size)) {
-                    IsoStart.STREAMED -> return
-                    IsoStart.QUEUE_FAILED ->
-                        detail = "no se pudo encolar la lectura isocrona ($size B, " +
-                            "alt ${iface.alternateSetting})"
-                    IsoStart.INIT_FAILED ->
-                        detail = "el endpoint isocrono rechazó la petición " +
-                            "(alt ${iface.alternateSetting})"
-                    IsoStart.NO_DATA ->
-                        detail = "la cámara no envió datos ($size B, " +
-                            "alt ${iface.alternateSetting})"
-                }
-            }
-        }
-        if (running) {
-            onStatus(
-                "$detail · ya probé todas las variantes isocronas de esta cámara. " +
-                    "Los hubs y adaptadores suelen romper este modo: probá un cable " +
-                    "directo al USB-C del teléfono y, si sigue, una resolución menor."
-            )
-        }
-    }
-
-    /**
-     * Un intento completo: encola ISOC_REQUESTS lecturas del tamaño dado y bombea
-     * hasta que se corta. Si la cola se acepta pero no llega nada, un vigilante
-     * cancela una petición para no quedarse esperando para siempre.
-     */
-    private fun pumpIsochronous(
-        conn: UsbDeviceConnection,
-        endpoint: UsbEndpoint,
-        size: Int
-    ): IsoStart {
-        val requests = ArrayList<UsbRequest>(ISOC_REQUESTS)
-        val buffers = ArrayList<ByteBuffer>(ISOC_REQUESTS)
-        for (index in 0 until ISOC_REQUESTS) {
-            val request = UsbRequest()
-            if (!request.initialize(conn, endpoint)) {
-                runCatching { request.close() }
-                closeRequests(requests)
-                return IsoStart.INIT_FAILED
-            }
-            val buffer = ByteBuffer.allocateDirect(size)
-            if (!request.queue(buffer, size)) {
-                Log.w(TAG, "queue rechazado: $size B")
-                runCatching { request.close() }
-                closeRequests(requests)
-                return IsoStart.QUEUE_FAILED
-            }
-            requests.add(request)
-            buffers.add(buffer)
-        }
-
-        val chunk = ByteArray(size)
-        val raw = endpoint.maxPacketSize and 0xFFFF
-        // Cada paquete ocupa su slot completo dentro del buffer leído.
-        val stride = if (raw in 1..size) raw else size
-        val received = java.util.concurrent.atomic.AtomicInteger(0)
-        val watchdog = Thread {
-            runCatching { Thread.sleep(4_000L) }
-            val muted = Thread.currentThread().isInterrupted
-            if (!muted && running && received.get() == 0) {
-                runCatching { requests.firstOrNull()?.cancel() }
-            }
-        }
-        watchdog.isDaemon = true
-        watchdog.name = "uvc-isoc-watch"
-        watchdog.start()
-
-        var packets = 0
-        while (running) {
-            val done = runCatching { conn.requestWait() }.getOrNull() ?: break
-            val index = requests.indexOf(done)
-            if (index < 0) continue
-            val buffer = buffers[index]
-            buffer.position(0)
-            buffer.get(chunk)
-            packets++
-            received.incrementAndGet()
-            handleIsoPackets(chunk, size, stride)
-            java.util.Arrays.fill(chunk, 0)
-            buffer.clear()
-            buffer.put(chunk)
-            buffer.position(0)
-            if (!running) break
-            if (!done.queue(buffer, size)) break
-        }
-        watchdog.interrupt()
-        closeRequests(requests)
-        return if (packets > 0) IsoStart.STREAMED else IsoStart.NO_DATA
-    }
-
-    private fun closeRequests(requests: List<UsbRequest>) {
-        for (request in requests) {
-            runCatching { request.cancel() }
-            runCatching { request.close() }
-        }
-    }
-
-    /**
-     * Tamaños de buffer a probar. Primero múltiplos del wMaxPacketSize crudo (lo
-     * que espera el kernel) y después los bytes reales por microframe, por si el
-     * descriptor viene con los bits de transacciones por microframe.
-     */
-    private fun isocSizes(endpoint: UsbEndpoint): List<Int> {
-        val raw = endpoint.maxPacketSize and 0xFFFF
-        val low = raw and 0x7FF
-        val mult = ((raw shr 11) and 0x03).let { if (it == 0) 1 else it + 1 }
-        val perMicroframe = (low * mult).coerceAtLeast(1)
-        val sizes = linkedSetOf<Int>()
-        if (raw > 0) {
-            for (packets in intArrayOf(8, 4, 2, 1)) {
-                val size = raw * packets
-                if (size in 1..(512 * 1024)) sizes.add(size)
-            }
-        }
-        for (packets in intArrayOf(8, 4)) {
-            val size = perMicroframe * packets
-            if (size in 1..(512 * 1024)) sizes.add(size)
-        }
-        if (sizes.isEmpty()) sizes.add(8192)
-        return sizes.toList()
-    }
-
-    /**
-     * Cada slot del buffer leído es un paquete isocrono con su propia cabecera de
-     * payload UVC: se recorre por tramos fijos en vez de tomar sólo el primero.
-     */
-    private fun handleIsoPackets(data: ByteArray, length: Int, stride: Int) {
-        val step = if (stride > 0) stride else length
-        var offset = 0
-        while (offset + 2 <= length) {
-            val first = data[offset].toInt() and 0xFF
-            val info = data[offset + 1].toInt() and 0xFF
-            val headerLength = if (first == 0xFF) {
-                if (offset + 3 > length) return
-                data[offset + 2].toInt() and 0xFF
-            } else {
-                first
-            }
-            if (headerLength < 2 || offset + headerLength > length) return
-
-            val fid = info and 0x01
-            val endOfFrame = info and 0x02 != 0
-            val error = info and 0x40 != 0
-
-            if (fid != lastFid && frameBuffer.size() > 0) closeFrame()
-            lastFid = fid
-            val start = offset + headerLength
-            val end = (offset + step).coerceAtMost(length)
-            if (!error && end > start) {
-                if (frameBuffer.size() + (end - start) > MAX_FRAME_BYTES) {
-                    frameBuffer.reset()
-                }
-                frameBuffer.write(data, start, end - start)
-            }
-            if (endOfFrame) closeFrame()
-            offset += step
-        }
-    }
-
-    /**
-     * Cabecera de payload UVC: bHeaderLength, bmHeaderInfo (FID/EOF/error) y
-     * opcionalmente PTS. Un frame termina al cambiar el FID o al llegar EOF.
-     */
-    private fun handlePacket(data: ByteArray, length: Int, isIsochronous: Boolean) {
-        var offset = 0
-        while (offset + 2 <= length) {
-            val first = data[offset].toInt() and 0xFF
-            val info = data[offset + 1].toInt() and 0xFF
-            val headerLength = if (first == 0xFF) {
-                if (offset + 3 > length) return
-                data[offset + 2].toInt() and 0xFF
-            } else {
-                first
-            }
-            if (headerLength < 2 || offset + headerLength > length) return
-
-            val fid = info and 0x01
-            val endOfFrame = info and 0x02 != 0
-            val error = info and 0x40 != 0
-
-            if (fid != lastFid && frameBuffer.size() > 0) closeFrame()
-            lastFid = fid
-            if (!error) {
-                frameBuffer.write(data, offset + headerLength, length - offset - headerLength)
-            }
-            if (endOfFrame) closeFrame()
-            if (!isIsochronous) return
-            offset = length
-        }
-    }
-
-    private fun closeFrame() {
-        if (frameBuffer.size() < 8) {
-            frameBuffer.reset()
+        val failure = openError.get()
+        if (failure != null) {
+            Log.w(TAG, "No se pudo abrir la cámara", failure)
+            onStatus("No se pudo abrir la cámara: ${failure.message}")
+            release()
             return
         }
-        val bytes = frameBuffer.toByteArray()
-        frameBuffer.reset()
-        emit(bytes)
-    }
+        val block = controlBlock
+        if (block == null) {
+            onStatus("La cámara abrió sin bloque de control USB")
+            release()
+            return
+        }
 
-    private fun emit(data: ByteArray) {
-        val minimumGap = 1000L / streamFps.coerceIn(1, 60)
-        val now = System.currentTimeMillis()
-        if (now - lastEmit < minimumGap) return
-        if (formatKind == UvcFormatKind.MJPEG) {
-            val end = jpegEnd(data)
-            if (end <= 4) return
-            if ((data[0].toInt() and 0xFF) != 0xFF || (data[1].toInt() and 0xFF) != 0xD8) return
-            val jpeg = if (end == data.size) data else data.copyOf(end)
-            val bitmap = runCatching { BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) }
-                .getOrNull() ?: return
-            val width = bitmap.width
-            val height = bitmap.height
-            if (width <= 0 || height <= 0) {
-                bitmap.recycle()
-                return
+        val thread = HandlerThread("UVC-Camera").apply { start() }
+        cameraThread = thread
+        val handler = Handler(thread.looper)
+        cameraHandler = handler
+        val cameraLatch = CountDownLatch(1)
+        handler.post {
+            try {
+                openCamera(block)
+            } catch (t: Throwable) {
+                openError.compareAndSet(null, IllegalStateException(t.message ?: t.toString()))
+            } finally {
+                cameraLatch.countDown()
             }
-            val rgba = ByteArray(width * height * 4)
-            bitmap.copyPixelsToBuffer(ByteBuffer.wrap(rgba))
-            bitmap.recycle()
-            lastEmit = now
-            onFrame(rgba, width, height, streamFps)
-        } else {
-            val width = frameWidth
-            val height = frameHeight
-            val needed = width * height * 2
-            if (data.size < needed) return
-            val rgba = UvcYuv.yuy2ToRgba(data, width, height)
-            lastEmit = now
-            onFrame(rgba, width, height, streamFps)
+        }
+        if (!cameraLatch.await(OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            openError.compareAndSet(null, IllegalStateException("El flujo no arrancó a tiempo"))
+        }
+        val startFailure = openError.get()
+        if (startFailure != null) {
+            Log.w(TAG, "No se pudo iniciar el flujo UVC", startFailure)
+            onStatus("No se pudo iniciar el flujo UVC: ${startFailure.message}")
+            release()
         }
     }
 
-    /** Los buffers isocronos pueden venir con cola obsoleta: se corta en el EOI. */
-    private fun jpegEnd(data: ByteArray): Int {
-        var index = data.size - 2
-        while (index > 0) {
-            if ((data[index].toInt() and 0xFF) == 0xFF &&
-                (data[index + 1].toInt() and 0xFF) == 0xD9
-            ) {
-                return index + 2
+    /** Corre en el hilo de la cámara, que necesita un Looper. */
+    private fun openCamera(block: USBMonitor.UsbControlBlock) {
+        if (!running) return
+        val uvc = UVCCamera(null)
+        opened = uvc
+        val result = uvc.open(block)
+        if (result != 0) throw IllegalStateException("libuvc devolvió $result al abrir")
+
+        val mode = chooseMode(uvc.supportedSizeList)
+            ?: throw IllegalStateException("La cámara no informa ningún modo de vídeo")
+        uvc.setPreviewSize(mode)
+
+        // libuvc sólo arranca su hilo de captura cuando hay una superficie de
+        // preview, aunque los cuadros lleguen por callback: se le da un ImageReader
+        // y se van descartando las imágenes para que nunca se bloquee.
+        val sink = ImageReader.newInstance(mode.width, mode.height, PixelFormat.RGBA_8888, 2)
+        sink.setOnImageAvailableListener(
+            { reader -> runCatching { reader?.acquireLatestImage()?.close() } },
+            cameraHandler
+        )
+        previewSink = sink
+        uvc.setPreviewDisplay(sink.surface)
+
+        val width = mode.width
+        val height = mode.height
+        val fps = if (mode.fps > 0) mode.fps else 30
+        uvc.setFrameCallback(object : IFrameCallback {
+            override fun onFrame(frame: ByteBuffer?) {
+                if (!capturing || frame == null) return
+                val available = frame.remaining()
+                val needed = width * height * 4
+                if (available < needed) return
+                val target = buffer(needed)
+                val source = frame.duplicate()
+                source.position(0)
+                source.limit(needed)
+                source.get(target, 0, needed)
+                onFrame(target, width, height, fps)
             }
-            index--
-        }
-        return -1
+        }, UVCCamera.PIXEL_FORMAT_RGBX)
+
+        capturing = true
+        uvc.startPreview()
+        val format = if (mode.type == UVCCamera.UVC_VS_FRAME_MJPEG) "MJPEG" else "YUY2"
+        onStatus("$format ${width}×$height @ $fps fps · libuvc")
     }
 
-    private fun negotiate(
-        conn: UsbDeviceConnection,
-        topology: UvcTopology,
-        format: UvcFormat,
-        frame: UvcFrame
-    ): Int {
-        val index = topology.streamingInterface
-        var size = 34
-        var probe = ByteArray(size)
-        if (conn.controlTransfer(0xA1, GET_CUR, PROBE_CONTROL shl 8, index, probe, size, 600) < 0) {
-            size = 26
-            probe = ByteArray(size)
-            if (conn.controlTransfer(0xA1, GET_CUR, PROBE_CONTROL shl 8, index, probe, size, 600) < 0) {
-                throw IllegalStateException("La cámara no respondió a VS_PROBE_CONTROL")
+    /** Elige el modo de la altura pedida, prefiriendo MJPEG como la referencia. */
+    private fun chooseMode(sizes: List<Size>?): Size? {
+        if (sizes.isNullOrEmpty()) return null
+        return closestHeight(sizes, true) ?: closestHeight(sizes, false) ?: sizes.first()
+    }
+
+    private fun closestHeight(sizes: List<Size>, mjpegOnly: Boolean): Size? {
+        val wanted = if (preferredHeight > 0) preferredHeight else 720
+        var best: Size? = null
+        var bestDistance = Int.MAX_VALUE
+        var bestAspect = Int.MAX_VALUE
+        for (size in sizes) {
+            if (mjpegOnly && size.type != UVCCamera.UVC_VS_FRAME_MJPEG) continue
+            val distance = kotlin.math.abs(size.height - wanted)
+            val aspect = kotlin.math.abs(size.width * 9 - size.height * 16) /
+                kotlin.math.max(1, size.height)
+            val current = best
+            val better = current == null || distance < bestDistance ||
+                (distance == bestDistance && aspect < bestAspect) ||
+                (distance == bestDistance && aspect == bestAspect && size.width > current.width)
+            if (better) {
+                best = size
+                bestDistance = distance
+                bestAspect = aspect
             }
         }
+        return best
+    }
 
-        put16(probe, 0, 0x0001)
-        probe[2] = format.index.toByte()
-        probe[3] = frame.index.toByte()
-        put32(probe, 4, frame.defaultInterval)
-        put16(probe, 8, 1)
-        put16(probe, 10, 0)
-        put16(probe, 12, 0)
-        put16(probe, 14, 0)
-        put16(probe, 16, 0)
-
-        if (conn.controlTransfer(0x21, SET_CUR, PROBE_CONTROL shl 8, index, probe, size, 600) < 0) {
-            throw IllegalStateException("La cámara rechazó el formato pedido")
+    /** Un solo buffer: el consumidor copia el cuadro dentro de la llamada. */
+    private fun buffer(size: Int): ByteArray {
+        val current = reusable
+        if (current.size != size) {
+            val created = ByteArray(size)
+            reusable = created
+            return created
         }
+        return current
+    }
 
-        val accepted = ByteArray(size)
-        if (conn.controlTransfer(0xA1, GET_CUR, PROBE_CONTROL shl 8, index, accepted, size, 600) < 0) {
-            throw IllegalStateException("La cámara no confirmó el formato")
+    private fun release() {
+        capturing = false
+        running = false
+        val current = opened
+        opened = null
+        val handler = cameraHandler
+        if (handler != null && current != null) {
+            val closed = CountDownLatch(1)
+            handler.post {
+                runCatching { current.stopPreview() }
+                runCatching { current.close() }
+                runCatching { current.destroy() }
+                closed.countDown()
+            }
+            runCatching { closed.await(CLOSE_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
         }
-        val acceptedFormat = accepted[2].toInt() and 0xFF
-        val acceptedFrame = accepted[3].toInt() and 0xFF
-        if (acceptedFormat != format.index || acceptedFrame != frame.index) {
-            throw IllegalStateException(
-                "La cámara eligió otro formato (${acceptedFormat}/${acceptedFrame})"
-            )
-        }
-        val interval = le32(accepted, 4)
-        if (interval > 0) streamFps = (10_000_000 / interval).coerceIn(1, 60)
-
-        val maxPayload = if (size >= 26) le32(accepted, 22) else 0
-
-        if (conn.controlTransfer(0x21, SET_CUR, COMMIT_CONTROL shl 8, index, accepted, size, 600) < 0) {
-            throw IllegalStateException("La cámara rechazó el commit del formato")
-        }
-        return maxPayload
+        previewSink?.let { runCatching { it.close() } }
+        previewSink = null
+        cameraThread?.let { runCatching { it.quitSafely() } }
+        cameraThread = null
+        cameraHandler = null
+        monitor?.let { runCatching { it.destroy() } }
+        monitor = null
+        controlBlock = null
     }
 
     private fun fail(message: String): Boolean {
         Log.w(TAG, message)
         onStatus(message)
         return false
-    }
-
-    private fun put16(data: ByteArray, offset: Int, value: Int) {
-        if (offset + 1 >= data.size) return
-        data[offset] = (value and 0xFF).toByte()
-        data[offset + 1] = ((value shr 8) and 0xFF).toByte()
-    }
-
-    private fun put32(data: ByteArray, offset: Int, value: Int) {
-        if (offset + 3 >= data.size) return
-        data[offset] = (value and 0xFF).toByte()
-        data[offset + 1] = ((value shr 8) and 0xFF).toByte()
-        data[offset + 2] = ((value shr 16) and 0xFF).toByte()
-        data[offset + 3] = ((value shr 24) and 0xFF).toByte()
-    }
-
-    private fun le32(data: ByteArray, offset: Int): Int {
-        if (offset + 3 >= data.size) return 0
-        return (data[offset].toInt() and 0xFF) or
-            ((data[offset + 1].toInt() and 0xFF) shl 8) or
-            ((data[offset + 2].toInt() and 0xFF) shl 16) or
-            ((data[offset + 3].toInt() and 0xFF) shl 24)
     }
 }

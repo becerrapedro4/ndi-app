@@ -17,8 +17,8 @@ android {
         applicationId = "com.ndiapp.camera"
         minSdk = 26
         targetSdk = 34
-        versionCode = 61
-        versionName = "1.15.17"
+        versionCode = 62
+        versionName = "1.15.18"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
@@ -91,4 +91,9 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-exoplayer-rtsp:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
+    implementation("androidx.annotation:annotation:1.8.2")
+    // Captura UVC con libuvc (UVCAndroid): maneja endpoints isocronos y bulk y
+    // convierte MJPEG/YUY2 a RGBA en C. La variante de app/libs trae el parche de
+    // reensamblado de payloads bulk; ver app/libs/README.md y el README raíz.
+    implementation(files("libs/UVCAndroid-1.0.13-feedwatch.aar"))
 }
