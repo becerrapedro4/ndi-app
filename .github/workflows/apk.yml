@@ -19,17 +19,32 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # El código nativo (puente JNI + libndi.so) no cambia entre versiones de la
-      # interfaz. Se toman del APK v1.9.2 publicado, así la compilación no necesita
-      # el SDK de NDI para Android, que la licencia no permite versionar.
-      - name: Librerías nativas de NDI ya compiladas
+      # libndi.so es la biblioteca propietaria del SDK y no se puede versionar:
+      # se toma del APK v1.9.2 ya publicado. El puente JNI sí se compila en cada
+      # compilación contra las cabeceras MIT de ndi-sdk/include, así los cambios
+      # en ndi_bridge.cpp llegan al APK.
+      - name: Librería NDI del APK base
         run: |
           curl -fsSL -o /tmp/base.apk \
             "https://github.com/becerrapedro4/ndi-app/releases/download/v1.9.2/NDI-App-1.9.2.apk"
           unzip -o -q /tmp/base.apk 'lib/*' -d /tmp/base
           for abi in arm64-v8a armeabi-v7a; do
             mkdir -p "android/app/src/main/jniLibs/$abi"
-            cp "/tmp/base/lib/$abi/libndi.so" "/tmp/base/lib/$abi/libndi_app.so" \
+            cp "/tmp/base/lib/$abi/libndi.so" "android/app/src/main/jniLibs/$abi/"
+          done
+
+      - name: Compilar el puente JNI de NDI
+        run: |
+          set -eux
+          NDK="$ANDROID_NDK_LATEST_HOME"
+          for abi in arm64-v8a armeabi-v7a; do
+            cmake -S android/app/src/main/cpp -B "/tmp/ndi-$abi" \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-26 \
+              -DCMAKE_BUILD_TYPE=Release
+            cmake --build "/tmp/ndi-$abi" -j"$(nproc)"
+            mkdir -p "android/app/src/main/jniLibs/$abi"
+            cp "$(find "/tmp/ndi-$abi" -name libndi_app.so | head -1)" \
                "android/app/src/main/jniLibs/$abi/"
           done
 

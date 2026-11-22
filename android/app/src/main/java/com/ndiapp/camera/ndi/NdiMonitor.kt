@@ -17,6 +17,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
 
 /** Descubrimiento de fuentes NDI presentes en la red local. */
 class NdiFinder {
@@ -115,11 +117,27 @@ class NdiReceiverController {
     private var trackRate = 0
     private var trackChannels = 0
 
+    // El audio va en su propio hilo: un write bloqueante no puede frenar el vídeo.
+    private val audioQueue = ArrayBlockingQueue<AudioBlock>(16)
+
+    @Volatile
+    private var audioWriter: Thread? = null
+
+    @Volatile
+    private var audioProblem = ""
+
     @Volatile
     private var levelLeft = 0f
 
     @Volatile
     private var levelRight = 0f
+
+    private class AudioBlock(
+        val pcm: FloatArray,
+        val samples: Int,
+        val channels: Int,
+        val rate: Int
+    )
 
     val isRunning: Boolean
         get() = handle != 0L
@@ -140,8 +158,11 @@ class NdiReceiverController {
         if (socket == 0L) return
         synchronized(lock) { handle = socket }
 
-        val rgbaBuffer = ByteArray(1920 * 1080 * 4)
+        // Se arranca en 1080p y se agranda solo cuando la fuente entrega 4K: el
+        // puente avisa con el tipo 7 que el cuadro no entraba.
+        var rgbaBuffer = ByteArray(1920 * 1080 * 4)
         val pcmBuffer = FloatArray(48_000 * 2)
+        startAudioWriter()
 
         job = scope.launch(Dispatchers.Default) {
             var sourceFrame: Bitmap? = null
@@ -158,15 +179,19 @@ class NdiReceiverController {
             var audioRate = 0
             var audioChannels = 0
             var audioPackets = 0
-            var audioProblem = ""
             var windowStart = SystemClock.elapsedRealtime()
             while (isActive) {
                 val poll = NdiNative.recvPoll(socket, rgbaBuffer, pcmBuffer, 60) ?: break
                 when (poll[0]) {
-                    1 -> {
+                    // 7 = el cuadro no entraba en el búfer: se agranda y se sigue.
+                    1, 7 -> {
                         val width = poll[1]
                         val height = poll[2]
-                        if (width > 0 && height > 0) {
+                        val needed = width * height * 4
+                        if (width > 0 && height > 0 && needed > rgbaBuffer.size) {
+                            rgbaBuffer = ByteArray(needed)
+                        }
+                        if (width > 0 && height > 0 && poll[0] == 1) {
                             frames++
                             // La copia del RGBA y la reducción se hacen en este hilo:
                             // al principal solo llega el cuadro ya listo para pintar.
@@ -208,11 +233,23 @@ class NdiReceiverController {
 
                     2 -> {
                         audioPackets++
+                        val samples = poll[3]
+                        val channels = poll[4]
                         audioRate = poll[5]
-                        audioChannels = poll[4]
-                        updateLevels(pcmBuffer, poll[3], poll[4])
-                        if (audioEnabled()) {
-                            audioProblem = writeAudio(pcmBuffer, poll[3], poll[4], poll[5])
+                        audioChannels = channels
+                        updateLevels(pcmBuffer, samples, channels)
+                        if (audioEnabled() && samples > 0 && channels > 0) {
+                            // Copia mínima y a la cola: el hilo del vídeo no espera
+                            // a que el AudioTrack acepte el bloque.
+                            val block = AudioBlock(
+                                pcmBuffer.copyOf(samples * channels),
+                                samples,
+                                channels,
+                                poll[5]
+                            )
+                            if (!audioQueue.offer(block)) {
+                                audioProblem = "la salida de audio no da abasto"
+                            }
                         }
                     }
                 }
@@ -266,6 +303,28 @@ class NdiReceiverController {
         val rmsRight = kotlin.math.sqrt(right / samples)
         levelLeft = maxOf(rmsLeft, levelLeft)
         levelRight = maxOf(rmsRight, levelRight)
+    }
+
+    /** Hilo propio del audio: escribe en el AudioTrack sin frenar la recepción. */
+    private fun startAudioWriter() {
+        if (audioWriter != null) return
+        val thread = Thread {
+            while (!Thread.currentThread().isInterrupted) {
+                val block = runCatching { audioQueue.poll(200, TimeUnit.MILLISECONDS) }
+                    .getOrNull() ?: continue
+                audioProblem = writeAudio(block.pcm, block.samples, block.channels, block.rate)
+            }
+        }
+        thread.name = "ndi-recv-audio"
+        thread.isDaemon = true
+        audioWriter = thread
+        thread.start()
+    }
+
+    private fun stopAudioWriter() {
+        audioWriter?.interrupt()
+        audioWriter = null
+        audioQueue.clear()
     }
 
     /** Devuelve un mensaje si la salida de audio no pudo escribirse. */
@@ -368,6 +427,7 @@ class NdiReceiverController {
     }
 
     private fun releaseAudio() {
+        stopAudioWriter()
         track?.let {
             try {
                 it.pause()

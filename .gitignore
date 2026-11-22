@@ -15,10 +15,13 @@ keystore.properties
 play-service-account.json
 *.env
 
-# NDI SDK: su licencia no permite redistribuirlo. Copiar localmente
-# (ver README) antes de compilar.
+# NDI SDK: la biblioteca libndi.so es propietaria y no se versiona.
+# Las cabeceras Processing.NDI.*.h son MIT y si se versionan (las compila CI).
 android/app/src/main/jniLibs/*/libndi.so
-android/app/src/main/cpp/ndi-sdk/
+android/app/src/main/cpp/ndi-sdk/*
+!android/app/src/main/cpp/ndi-sdk/include/
+!android/app/src/main/cpp/ndi-sdk/include/*.h
+!android/app/src/main/cpp/ndi-sdk/README.md
 
 # APKs generados: se publican como release, no en el historial
 dist/

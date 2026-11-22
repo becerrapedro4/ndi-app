@@ -25,6 +25,13 @@ bool g_init_ok = false;
 
 struct Sender {
     NDIlib_send_instance_t instance;
+    // Envío asíncrono: el SDK necesita que el cuadro siga vivo hasta el próximo
+    // envío. Con dos búferes nativos alternos se copia una vez (sin dejar el
+    // array de Java fijado por el GC) y nunca se bloquea el hilo de la cámara
+    // esperando al reloj de NDI.
+    std::vector<uint8_t> buffers[2];
+    int slot = 0;
+    std::mutex mutex;
 };
 
 struct Receiver {
@@ -98,8 +105,16 @@ Java_com_ndiapp_camera_ndi_NdiNative_sendVideo(JNIEnv *env, jobject, jlong handl
     if (!sender || !sender->instance || width <= 0 || height <= 0) return;
     if (env->GetArrayLength(rgba) < width * height * 4) return;
 
-    uint8_t *pixels = reinterpret_cast<uint8_t *>(env->GetPrimitiveArrayCritical(rgba, nullptr));
-    if (!pixels) return;
+    const size_t needed = static_cast<size_t>(width) * height * 4;
+    std::lock_guard<std::mutex> guard(sender->mutex);
+    std::vector<uint8_t> &buffer = sender->buffers[sender->slot];
+    if (buffer.size() < needed) buffer.resize(needed);
+    env->GetByteArrayRegion(rgba, 0, static_cast<jsize>(needed),
+                            reinterpret_cast<jbyte *>(buffer.data()));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return;
+    }
 
     NDIlib_video_frame_v2_t frame{};
     frame.xres = width;
@@ -110,13 +125,13 @@ Java_com_ndiapp_camera_ndi_NdiNative_sendVideo(JNIEnv *env, jobject, jlong handl
     frame.picture_aspect_ratio = static_cast<float>(width) / static_cast<float>(height);
     frame.frame_format_type = NDIlib_frame_format_type_progressive;
     frame.timecode = now100ns();
-    frame.p_data = pixels;
+    frame.p_data = buffer.data();
     frame.line_stride_in_bytes = width * 4;
     frame.p_metadata = nullptr;
     frame.timestamp = now100ns() * 100;  // nanosegundos
 
-    NDIlib_send_send_video_v2(sender->instance, &frame);
-    env->ReleasePrimitiveArrayCritical(rgba, pixels, JNI_ABORT);
+    NDIlib_send_send_video_async_v2(sender->instance, &frame);
+    sender->slot ^= 1;
 }
 
 JNIEXPORT void JNICALL
@@ -153,7 +168,11 @@ JNIEXPORT void JNICALL
 Java_com_ndiapp_camera_ndi_NdiNative_sendDestroy(JNIEnv *, jobject, jlong handle) {
     auto *sender = reinterpret_cast<Sender *>(handle);
     if (!sender) return;
-    if (sender->instance) NDIlib_send_destroy(sender->instance);
+    if (sender->instance) {
+        // Vacía el cuadro asíncrono pendiente antes de destruir la instancia.
+        NDIlib_send_send_video_async_v2(sender->instance, nullptr);
+        NDIlib_send_destroy(sender->instance);
+    }
     delete sender;
 }
 
@@ -258,8 +277,14 @@ Java_com_ndiapp_camera_ndi_NdiNative_recvPoll(JNIEnv *env, jobject, jlong handle
         const int width = video.xres;
         const int height = video.yres;
         const int stride = video.line_stride_in_bytes;
+        // Siempre se informa el tamaño real del cuadro: si no entra en el búfer
+        // de Kotlin se devuelve el tipo 7 para que lo agrande (4K incluido) en
+        // vez de descartar el cuadro en silencio.
+        out[1] = width;
+        out[2] = height;
+        const size_t needed = static_cast<size_t>(width) * height * 4;
         if (width > 0 && height > 0 && video.p_data &&
-            env->GetArrayLength(rgba) >= width * height * 4) {
+            static_cast<size_t>(env->GetArrayLength(rgba)) >= needed) {
             auto *dst = reinterpret_cast<uint8_t *>(env->GetPrimitiveArrayCritical(rgba, nullptr));
             if (dst) {
                 for (int y = 0; y < height; ++y) {
@@ -268,9 +293,11 @@ Java_com_ndiapp_camera_ndi_NdiNative_recvPoll(JNIEnv *env, jobject, jlong handle
                                 static_cast<size_t>(width) * 4);
                 }
                 env->ReleasePrimitiveArrayCritical(rgba, dst, 0);
-                out[1] = width;
-                out[2] = height;
+            } else {
+                out[0] = 7;
             }
+        } else if (width > 0 && height > 0) {
+            out[0] = 7;
         }
         NDIlib_recv_free_video_v2(receiver->instance, &video);
     } else if (type == NDIlib_frame_type_audio) {
