@@ -11,7 +11,6 @@ import android.os.Looper
 import android.util.Log
 import com.serenegiant.usb.IFrameCallback
 import com.serenegiant.usb.Size
-import com.serenegiant.usb.USBException
 import com.serenegiant.usb.USBMonitor
 import com.serenegiant.usb.UVCCamera
 import java.nio.ByteBuffer
@@ -98,7 +97,7 @@ class UvcStreamer(
             deviceLatch.countDown()
         }
 
-        override fun onError(device: UsbDevice, e: USBException) {
+        override fun onError(device: UsbDevice, e: USBMonitor.USBException) {
             openError.compareAndSet(null, e)
             deviceLatch.countDown()
         }
