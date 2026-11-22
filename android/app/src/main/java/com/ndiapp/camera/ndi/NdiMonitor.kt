@@ -291,7 +291,12 @@ class NdiReceiverController {
     private fun destroyWhenIdle(running: Job?, socket: Long) {
         if (socket == 0L) return
         Thread {
-            runCatching { running?.join(1500) }
+            runCatching {
+                val pending = running ?: return@Thread
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeoutOrNull(1_500L) { pending.join() }
+                }
+            }
             NdiNative.recvDestroy(socket)
         }.apply {
             isDaemon = true
