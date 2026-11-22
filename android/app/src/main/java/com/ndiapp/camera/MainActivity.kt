@@ -1127,6 +1127,7 @@ private fun CameraScreen(
     ) { granted = hasCameraPermissions(context) }
     var chrome by remember { mutableStateOf(true) }
     var focusRing by remember { mutableStateOf<Offset?>(null) }
+    var netWarning by remember { mutableStateOf<String?>(null) }
     // El visor se encaja por encima del dock: se mide la distancia desde el
     // borde inferior de la pantalla hasta el dock, no el alto de las barras, así
     // el cuadro conserva su tamaño cuando se abren o cierran.
@@ -1140,6 +1141,25 @@ private fun CameraScreen(
             delay(1100)
             focusRing = null
         }
+    }
+
+    // Una fuente NDI al aire sin Wi-Fi o con el multicast apagado no llega a
+    // ningún receptor: se avisa de forma fija para que no parezca que sale.
+    LaunchedEffect(camera.running) {
+        while (camera.running) {
+            // Si el lock se perdió, se recupera antes de avisar: el aviso es
+            // para cuando de verdad no hay red o no hay multicast.
+            MulticastLock.ensure(context)
+            val net = withContext(Dispatchers.IO) { localNetwork(context) }
+            netWarning = when {
+                !net.wifi -> "NDI al aire sin Wi-Fi: la fuente no llega a la red"
+                !net.multicast -> "NDI al aire sin multicast: nadie puede descubrir la fuente"
+                net.address.isBlank() -> "NDI al aire sin dirección de red: no puede anunciarse"
+                else -> null
+            }
+            delay(2000)
+        }
+        netWarning = null
     }
 
     LaunchedEffect(Unit) {
@@ -1259,6 +1279,21 @@ private fun CameraScreen(
                     .align(Alignment.TopCenter)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
                     .padding(top = 54.dp)
+            )
+        }
+
+        // Aviso de red, fijo sobre el visor: mientras esté visible la fuente
+        // NDI no puede llegar a la LAN aunque la app diga que está emitiendo.
+        netWarning?.let { message ->
+            StatusPill(
+                running = false,
+                warning = true,
+                text = message,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(top = 88.dp, start = 12.dp, end = 12.dp)
+                    .widthIn(max = 360.dp)
             )
         }
 
@@ -2911,7 +2946,12 @@ private fun FramingGrid() {
 }
 
 @Composable
-private fun StatusPill(running: Boolean, text: String, modifier: Modifier = Modifier) {
+private fun StatusPill(
+    running: Boolean,
+    text: String,
+    modifier: Modifier = Modifier,
+    warning: Boolean = false
+) {
     Row(
         modifier
             .glassSurface(
@@ -2928,7 +2968,13 @@ private fun StatusPill(running: Boolean, text: String, modifier: Modifier = Modi
             Modifier
                 .size(8.dp)
                 .clip(CircleShape)
-                .background(if (running) Color(0xFF4ADE80) else NdiGlass.Muted)
+                .background(
+                    when {
+                        warning -> Color(0xFFFFB020)
+                        running -> Color(0xFF4ADE80)
+                        else -> NdiGlass.Muted
+                    }
+                )
         )
         Spacer(Modifier.width(8.dp))
         Text(
