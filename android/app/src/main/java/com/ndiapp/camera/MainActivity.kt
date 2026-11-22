@@ -16,6 +16,8 @@ import android.graphics.Rect
 import android.hardware.camera2.CaptureRequest
 import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.content.res.Configuration
 import android.os.Build
@@ -162,6 +164,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.min
@@ -183,6 +187,8 @@ class MainActivity : ComponentActivity() {
         CrashLog.install(this)
         lastCrashText = CrashLog.take(this)?.let { CrashLog.summary(it) }
         enableMulticast()
+        // Los datos moviles no pueden llevarse el multicast de NDI.
+        bindToWifi(this)
         setContent {
             NdiAppTheme {
                 NdiBackdrop { AppRoot() }
@@ -216,6 +222,10 @@ private object MulticastLock {
 
     private var lock: WifiManager.MulticastLock? = null
 
+    /** El sistema esta entregando multicast ahora mismo. */
+    val held: Boolean
+        get() = lock?.isHeld == true
+
     /** Pide el lock una sola vez y lo conserva mientras viva la app. */
     fun ensure(context: Context) {
         if (lock?.isHeld == true) return
@@ -228,6 +238,69 @@ private object MulticastLock {
             }
         }
     }
+}
+
+/**
+ * Fija los sockets del proceso a la Wi-Fi. Con datos moviles activos, Android
+ * manda el multicast por la interfaz por defecto (la celular): el anuncio NDI
+ * no llega a la LAN y el monitor solo encuentra las fuentes del propio telefono,
+ * aunque la IP manual funcione por unicast.
+ */
+private fun bindToWifi(context: Context) {
+    runCatching {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager ?: return
+        val wifi = manager.allNetworks.firstOrNull { network ->
+            manager.getNetworkCapabilities(network)
+                ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        } ?: return
+        manager.bindProcessToNetwork(wifi)
+    }
+}
+
+/**
+ * Red por la que sale la emision: sin Wi-Fi no hay NDI ni SRT en la LAN. El
+ * estado de multicast dice si Android esta entregando el anuncio mDNS de las
+ * demas fuentes.
+ */
+private data class LocalNetwork(
+    val wifi: Boolean,
+    val address: String,
+    val multicast: Boolean
+) {
+    val label: String
+        get() = when {
+            !wifi -> "datos moviles (sin Wi-Fi: no hay red local)"
+            address.isBlank() -> "Wi-Fi sin direccion"
+            else -> "Wi-Fi $address"
+        }
+}
+
+private fun localNetwork(context: Context): LocalNetwork {
+    var wifi = false
+    var address = ""
+    runCatching {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager
+        val active = manager?.activeNetwork
+        val caps = active?.let { manager.getNetworkCapabilities(it) }
+        wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+    }
+    runCatching {
+        val interfaces = NetworkInterface.getNetworkInterfaces().toList()
+            .filter { it.isUp && !it.isLoopback }
+            .sortedBy { if (it.name.startsWith("wlan")) 0 else 1 }
+        for (nic in interfaces) {
+            for (entry in nic.inetAddresses) {
+                val ip = entry as? Inet4Address ?: continue
+                if (ip.isLoopbackAddress || ip.isLinkLocalAddress) continue
+                address = ip.hostAddress.orEmpty()
+                break
+            }
+            if (address.isNotBlank()) break
+        }
+    }
+    return LocalNetwork(wifi, address, MulticastLock.held)
 }
 
 /** Muestra u oculta las barras del sistema para el visor a pantalla completa. */
@@ -824,6 +897,8 @@ private fun CameraUi.cameraRequest(): CameraRequest = CameraRequest(
 /** Deja la cámara encendida en el visor aunque no se esté emitiendo. */
 private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
     if (previewing) return
+    // Antes de crear los sockets de NDI, todo el proceso va por la Wi-Fi.
+    bindToWifi(appContext)
     // Si el lock se perdió (Wi-Fi reiniciado o un GC), se vuelve a pedir antes
     // de abrir la cámara: sin él la fuente NDI no se anuncia en la red.
     MulticastLock.ensure(appContext)
@@ -858,7 +933,14 @@ private fun CameraUi.start(lifecycleOwner: LifecycleOwner) {
     openPreview(lifecycleOwner)
     session.onStatus = { status = it }
     running = session.startStreaming()
-    if (!running) status = "No se pudo iniciar la emisión"
+    if (!running) {
+        status = "No se pudo iniciar la emisión"
+    } else {
+        // Si la salida no va por Wi-Fi, vMix no puede ver la fuente por más que
+        // la app diga que está emitiendo.
+        val net = localNetwork(appContext)
+        status = "Enviando «${sessionNdiName()}» · ${net.label}"
+    }
 }
 
 /** Corta la emisión; la cámara sigue visible en el visor. */
@@ -3054,6 +3136,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
     var cleanHint by remember { mutableStateOf(false) }
     var stats by remember { mutableStateOf(StreamStats()) }
     var proxy by remember { mutableStateOf(false) }
+    var net by remember { mutableStateOf(LocalNetwork(false, "", false)) }
     var guides by remember { mutableIntStateOf(0) }
     val activity = LocalContext.current as? Activity
     val context = LocalContext.current
@@ -3182,8 +3265,13 @@ private fun MonitorTab(onMenu: () -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
+            // Con datos moviles activos los sockets del proceso tienen que
+            // quedar en la Wi-Fi o el anuncio de las fuentes no llega.
+            withContext(Dispatchers.IO) { bindToWifi(context) }
             val found = withContext(Dispatchers.IO) { finder.sources() }
             sources = found
+            MulticastLock.ensure(context)
+            net = withContext(Dispatchers.IO) { localNetwork(context) }
             delay(2500)
         }
     }
@@ -3432,12 +3520,24 @@ private fun MonitorTab(onMenu: () -> Unit) {
 
                         if (sources.isEmpty()) {
                             Text(
-                                "Buscando fuentes NDI… asegúrate de estar en la misma red " +
-                                    "Wi-Fi o Ethernet.",
+                                if (!net.wifi) {
+                                    "Estás en datos móviles: conectate a la misma Wi-Fi que " +
+                                        "la PC para ver sus fuentes NDI."
+                                } else {
+                                    "Buscando fuentes NDI en " +
+                                        net.address.ifBlank { "la red local" } +
+                                        "… revisá que la PC esté en esa misma red."
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = NdiGlass.Muted
                             )
                         }
+                        Text(
+                            net.label + " · multicast " +
+                                if (net.multicast) "activo" else "apagado",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NdiGlass.Muted
+                        )
 
                         sources.forEach { source ->
                             Row(
@@ -4252,6 +4352,8 @@ private fun MediaTab(onMenu: () -> Unit) {
 /** Configuración de la salida SRT, en su propia pestaña del menú. */
 @Composable
 private fun SrtTab(onMenu: () -> Unit, srtUrl: String, onSrtUrl: (String) -> Unit) {
+    val context = LocalContext.current
+    val net = remember { localNetwork(context) }
     Column(Modifier.fillMaxSize()) {
         TopBar(
             modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
@@ -4274,6 +4376,11 @@ private fun SrtTab(onMenu: () -> Unit, srtUrl: String, onSrtUrl: (String) -> Uni
         ) {
             GlassPanel {
                 OutboundPanel(srtUrl = srtUrl, onSrtUrl = onSrtUrl)
+                Text(
+                    net.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = NdiGlass.Text
+                )
                 Text(
                     "El botón naranja del visor de la cámara arranca y corta la salida. " +
                         "El estado del socket y los MB enviados se muestran sobre el visor.",
