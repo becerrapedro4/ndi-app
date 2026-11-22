@@ -184,6 +184,7 @@ Java_com_ndiapp_camera_ndi_NdiNative_findSources(JNIEnv *env, jobject, jlong han
 
     uint32_t count = 0;
     const NDIlib_source_t *sources = NDIlib_find_get_current_sources(finder->instance, &count);
+    if (!sources || count == 0) return env->NewObjectArray(0, env->FindClass("java/lang/String"), nullptr);
 
     jclass string_class = env->FindClass("java/lang/String");
     jobjectArray result = env->NewObjectArray(static_cast<jsize>(count), string_class, nullptr);

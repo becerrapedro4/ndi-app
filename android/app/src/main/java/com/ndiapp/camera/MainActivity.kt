@@ -17,6 +17,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.content.res.Configuration
@@ -246,16 +247,26 @@ private object MulticastLock {
  * no llega a la LAN y el monitor solo encuentra las fuentes del propio telefono,
  * aunque la IP manual funcione por unicast.
  */
-private fun bindToWifi(context: Context) {
-    runCatching {
-        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-            as? ConnectivityManager ?: return
-        val wifi = manager.allNetworks.firstOrNull { network ->
-            manager.getNetworkCapabilities(network)
-                ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        } ?: return
-        manager.bindProcessToNetwork(wifi)
-    }
+private var boundNetwork: Network? = null
+
+private fun bindToWifi(context: Context): Boolean = runCatching {
+    val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+        as? ConnectivityManager
+    val wifi = manager?.allNetworks?.firstOrNull { network ->
+        manager.getNetworkCapabilities(network)
+            ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+    } ?: return@runCatching false
+    // Rebindeár cada dos segundos movía las tomas de libndi bajo sus pies y la
+    // hacía caer al volver a buscar fuentes: sólo se cambia si cambió la red.
+    if (boundNetwork == wifi) return@runCatching false
+    manager.bindProcessToNetwork(wifi)
+    boundNetwork = wifi
+    true
+}.getOrDefault(false)
+
+/** Fija los sockets a la Wi-Fi y rehace el finder si cambió la red. */
+private fun ensureWifiBinding(context: Context) {
+    if (bindToWifi(context)) sharedNdiFinder.restart()
 }
 
 /**
@@ -917,7 +928,7 @@ private fun CameraUi.cameraRequest(): CameraRequest = CameraRequest(
 private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
     if (previewing) return
     // Antes de crear los sockets de NDI, todo el proceso va por la Wi-Fi.
-    bindToWifi(appContext)
+    ensureWifiBinding(appContext)
     // Si el lock se perdió (Wi-Fi reiniciado o un GC), se vuelve a pedir antes
     // de abrir la cámara: sin él la fuente NDI no se anuncia en la red.
     MulticastLock.ensure(appContext)
@@ -3334,7 +3345,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
         while (true) {
             // Con datos móviles activos los sockets del proceso tienen que
             // quedar en la Wi-Fi o el anuncio de las fuentes no llega.
-            withContext(Dispatchers.IO) { bindToWifi(context) }
+            withContext(Dispatchers.IO) { ensureWifiBinding(context) }
             val found = withContext(Dispatchers.IO) { finder.sources() }
             sources = found
             MulticastLock.ensure(context)

@@ -38,6 +38,20 @@ class NdiFinder {
         }
     }
 
+    /**
+     * Rehace la instancia de NDI. Al cambiar la red del proceso (bind a Wi-Fi)
+     * las tomas del finder quedan sobre la interfaz vieja y libndi caía dentro
+     * de `find_get_current_sources`; con una instancia nueva eso no pasa.
+     */
+    @Synchronized
+    fun restart() {
+        if (handle != 0L) {
+            NdiNative.findDestroy(handle)
+            handle = 0L
+        }
+        handle = NdiNative.findCreate()
+    }
+
     @Synchronized
     fun close() {
         if (handle != 0L) {

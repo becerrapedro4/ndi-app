@@ -17,8 +17,8 @@ android {
         applicationId = "com.ndiapp.camera"
         minSdk = 26
         targetSdk = 34
-        versionCode = 53
-        versionName = "1.15.9"
+        versionCode = 54
+        versionName = "1.15.10"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
