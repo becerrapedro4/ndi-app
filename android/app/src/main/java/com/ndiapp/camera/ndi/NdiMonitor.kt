@@ -23,6 +23,7 @@ class NdiFinder {
     val isAvailable: Boolean
         get() = handle != 0L
 
+    @Synchronized
     fun sources(timeoutMs: Int = 400): List<NdiSource> {
         if (handle == 0L) return emptyList()
         val raw = NdiNative.findSources(handle, timeoutMs) ?: return emptyList()
@@ -37,6 +38,7 @@ class NdiFinder {
         }
     }
 
+    @Synchronized
     fun close() {
         if (handle != 0L) {
             NdiNative.findDestroy(handle)
@@ -72,8 +74,12 @@ data class StreamStats(
 /** Recibe video y audio de una fuente NDI y los entrega a la UI. */
 class NdiReceiverController {
 
+    @Volatile
     private var handle: Long = 0L
     private var job: Job? = null
+
+    /** Serializa el arranque y el cierre: libndi no admite usarse y destruirse a la vez. */
+    private val lock = Any()
     private var track: AudioTrack? = null
     private var trackRate = 0
     private var trackChannels = 0
@@ -95,9 +101,11 @@ class NdiReceiverController {
         onFrame: (Bitmap) -> Unit,
         onStats: (StreamStats) -> Unit = {}
     ) {
-        stop()
-        handle = NdiNative.recvCreate(source.fullName, source.url, lowBandwidth)
-        if (handle == 0L) return
+        // El anterior se destruye recién cuando su hilo salió de libndi.
+        releasePrevious()
+        val socket = NdiNative.recvCreate(source.fullName, source.url, lowBandwidth)
+        if (socket == 0L) return
+        synchronized(lock) { handle = socket }
 
         val rgbaBuffer = ByteArray(1920 * 1080 * 4)
         val pcmBuffer = FloatArray(48_000 * 2)
@@ -112,7 +120,7 @@ class NdiReceiverController {
             var audioProblem = ""
             var windowStart = SystemClock.elapsedRealtime()
             while (isActive) {
-                val poll = NdiNative.recvPoll(handle, rgbaBuffer, pcmBuffer, 60) ?: break
+                val poll = NdiNative.recvPoll(socket, rgbaBuffer, pcmBuffer, 60) ?: break
                 when (poll[0]) {
                     1 -> {
                         val width = poll[1]
@@ -243,8 +251,55 @@ class NdiReceiverController {
     }
 
     fun stop() {
-        job?.cancel()
-        job = null
+        val running = synchronized(lock) {
+            val current = job
+            job = null
+            current
+        }
+        val socket = synchronized(lock) {
+            val current = handle
+            handle = 0L
+            current
+        }
+        running?.cancel()
+        releaseAudio()
+        destroyWhenIdle(running, socket)
+    }
+
+    /** Suelta la fuente anterior antes de abrir otra. */
+    private fun releasePrevious() {
+        val running = synchronized(lock) {
+            val current = job
+            job = null
+            current
+        }
+        val socket = synchronized(lock) {
+            val current = handle
+            handle = 0L
+            current
+        }
+        running?.cancel()
+        releaseAudio()
+        destroyWhenIdle(running, socket)
+    }
+
+    /**
+     * Destruye la instancia sólo cuando el hilo de lectura ya salió de libndi.
+     * Destruirla mientras `recvPoll` está dentro de la librería la hacía caer en
+     * su propio hilo de captura (el crash que se veía al abrir una fuente).
+     */
+    private fun destroyWhenIdle(running: Job?, socket: Long) {
+        if (socket == 0L) return
+        Thread {
+            runCatching { running?.join(1500) }
+            NdiNative.recvDestroy(socket)
+        }.apply {
+            isDaemon = true
+            name = "ndi-recv-close"
+        }.start()
+    }
+
+    private fun releaseAudio() {
         track?.let {
             try {
                 it.pause()
@@ -258,9 +313,5 @@ class NdiReceiverController {
         trackChannels = 0
         levelLeft = 0f
         levelRight = 0f
-        if (handle != 0L) {
-            NdiNative.recvDestroy(handle)
-            handle = 0L
-        }
     }
 }

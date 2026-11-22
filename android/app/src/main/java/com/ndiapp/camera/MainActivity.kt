@@ -528,6 +528,9 @@ private fun enterPip(activity: Activity?, aspect: Float = 16f / 9f) {
 /** Último fallo no controlado, para mostrarlo en el estado de la cámara. */
 private var lastCrashText: String? = null
 
+/** Finder de NDI compartido por toda la app: no se destruye nunca. */
+private val sharedNdiFinder: NdiFinder by lazy { NdiFinder() }
+
 /** Estado compartido entre el visor y la pantalla de ajustes. */
 private class CameraUi(val appContext: Context) {
     val session = CameraSession(appContext)
@@ -3188,7 +3191,7 @@ private fun ScreenTab(onMenu: () -> Unit) {
 @Composable
 private fun MonitorTab(onMenu: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val finder = remember { NdiFinder() }
+    val finder = remember { sharedNdiFinder }
     val receiver = remember { NdiReceiverController() }
     var sources by remember { mutableStateOf(emptyList<NdiSource>()) }
     var playing by remember { mutableStateOf<NdiSource?>(null) }
@@ -3344,7 +3347,8 @@ private fun MonitorTab(onMenu: () -> Unit) {
             receiver.stop()
             SrtNative.cancel()
             player?.release()
-            finder.close()
+            // El finder es compartido y no se destruye: cerrarlo con una
+            // búsqueda en vuelo hacía caer libndi en su propio hilo.
         }
     }
 
