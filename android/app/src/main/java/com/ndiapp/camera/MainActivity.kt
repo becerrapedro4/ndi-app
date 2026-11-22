@@ -187,7 +187,7 @@ class MainActivity : ComponentActivity() {
         CrashLog.install(this)
         lastCrashText = CrashLog.take(this)?.let { CrashLog.summary(it) }
         enableMulticast()
-        // Los datos moviles no pueden llevarse el multicast de NDI.
+        // Los datos móviles no pueden llevarse el multicast de NDI.
         bindToWifi(this)
         setContent {
             NdiAppTheme {
@@ -241,7 +241,7 @@ private object MulticastLock {
 }
 
 /**
- * Fija los sockets del proceso a la Wi-Fi. Con datos moviles activos, Android
+ * Fija los sockets del proceso a la Wi-Fi. Con datos móviles activos, Android
  * manda el multicast por la interfaz por defecto (la celular): el anuncio NDI
  * no llega a la LAN y el monitor solo encuentra las fuentes del propio telefono,
  * aunque la IP manual funcione por unicast.
@@ -259,7 +259,7 @@ private fun bindToWifi(context: Context) {
 }
 
 /**
- * Red por la que sale la emision: sin Wi-Fi no hay NDI ni SRT en la LAN. El
+ * Red por la que sale la emisión: sin Wi-Fi no hay NDI ni SRT en la LAN. El
  * estado de multicast dice si Android esta entregando el anuncio mDNS de las
  * demas fuentes.
  */
@@ -270,8 +270,8 @@ private data class LocalNetwork(
 ) {
     val label: String
         get() = when {
-            !wifi -> "datos moviles (sin Wi-Fi: no hay red local)"
-            address.isBlank() -> "Wi-Fi sin direccion"
+            !wifi -> "datos móviles (sin Wi-Fi: no hay red local)"
+            address.isBlank() -> "Wi-Fi sin dirección"
             else -> "Wi-Fi $address"
         }
 }
@@ -3265,7 +3265,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            // Con datos moviles activos los sockets del proceso tienen que
+            // Con datos móviles activos los sockets del proceso tienen que
             // quedar en la Wi-Fi o el anuncio de las fuentes no llega.
             withContext(Dispatchers.IO) { bindToWifi(context) }
             val found = withContext(Dispatchers.IO) { finder.sources() }
