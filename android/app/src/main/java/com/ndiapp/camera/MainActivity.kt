@@ -120,6 +120,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -4293,6 +4295,33 @@ private fun MediaTab(onMenu: () -> Unit) {
         player.setLooping(loop)
     }
 
+    /** Arranca la fuente NDI si estaba detenida, o alterna pausa y reproducción. */
+    fun startOrToggle() {
+        if (!sending) {
+            // Tras detener, la fuente se vuelve a crear desde el elemento actual.
+            bindPlayer()
+            sending = player.start(
+                playlist,
+                "NDI App Multimedia",
+                if (current >= 0) current else 0
+            )
+            player.setExtraRotation(rotation)
+            if (!sending) status = "No se pudo iniciar la fuente NDI"
+        } else {
+            player.toggle()
+        }
+    }
+
+    fun stopAll() {
+        player.close()
+        sending = false
+        playing = false
+        position = 0
+        duration = 0
+        preview = null
+        status = "Detenido · pulsa Reproducir para reanudar"
+    }
+
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -4390,51 +4419,49 @@ private fun MediaTab(onMenu: () -> Unit) {
                 }
                 Row(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    GlassChip("Anterior", false, sending) { player.previous() }
-                    GlassChip(
-                        if (playing) "Pausa" else "Reproducir",
-                        playing,
-                        playlist.isNotEmpty()
-                    ) {
-                        if (!sending) {
-                            // Tras detener, la fuente se vuelve a crear desde el elemento actual.
-                            bindPlayer()
-                            sending = player.start(
-                                playlist,
-                                "NDI App Multimedia",
-                                if (current >= 0) current else 0
-                            )
-                            player.setExtraRotation(rotation)
-                            if (!sending) status = "No se pudo iniciar la fuente NDI"
-                        } else {
-                            player.toggle()
-                        }
+                    TransportButton(TransportGlyph.PREV, "Anterior", enabled = sending) {
+                        player.previous()
                     }
-                    GlassChip("Siguiente", false, sending) { player.next() }
-                }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    GlassChip("Bucle", loop) {
+                    TransportButton(TransportGlyph.STOP, "Detener", enabled = sending) {
+                        stopAll()
+                    }
+                    TransportButton(
+                        glyph = if (playing) TransportGlyph.PAUSE else TransportGlyph.PLAY,
+                        description = if (playing) "Pausa" else "Reproducir",
+                        enabled = playlist.isNotEmpty(),
+                        primary = true
+                    ) { startOrToggle() }
+                    TransportButton(TransportGlyph.NEXT, "Siguiente", enabled = sending) {
+                        player.next()
+                    }
+                    TransportButton(
+                        glyph = TransportGlyph.LOOP,
+                        description = "Bucle",
+                        active = loop
+                    ) {
                         loop = !loop
                         player.setLooping(loop)
                     }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     GlassChip("Girar $rotation°", rotation != 0) {
                         rotation = (rotation + 90) % 360
                         player.setExtraRotation(rotation)
                     }
-                    GlassChip("Detener", false, sending) {
-                        player.close()
-                        sending = false
-                        playing = false
-                        position = 0
-                        duration = 0
-                        preview = null
-                        status = "Detenido · pulsa Reproducir para reanudar"
-                    }
+                    Text(
+                        "Anterior · detener · reproducir/pausa · siguiente · bucle. " +
+                            "La barra de posición salta a cualquier punto.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Muted,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
             }
 
@@ -5032,5 +5059,133 @@ private fun LevelMeter(left: Float, right: Float, modifier: Modifier = Modifier)
                 )
             }
         }
+    }
+}
+
+// ----------------------------------------------------------- transporte UI --
+
+/** Iconos de transporte dibujados con Canvas: mismo trazo en todos los tamaños. */
+private enum class TransportGlyph { PLAY, PAUSE, STOP, PREV, NEXT, LOOP }
+
+@Composable
+private fun TransportIcon(glyph: TransportGlyph, tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = w * 0.11f
+        when (glyph) {
+            TransportGlyph.PLAY -> {
+                val path = Path().apply {
+                    moveTo(w * 0.3f, h * 0.12f)
+                    lineTo(w * 0.88f, h * 0.5f)
+                    lineTo(w * 0.3f, h * 0.88f)
+                    close()
+                }
+                drawPath(path, tint)
+            }
+
+            TransportGlyph.PAUSE -> {
+                val radius = CornerRadius(w * 0.05f)
+                drawRoundRect(
+                    tint,
+                    topLeft = Offset(w * 0.22f, h * 0.12f),
+                    size = Size(w * 0.18f, h * 0.76f),
+                    cornerRadius = radius
+                )
+                drawRoundRect(
+                    tint,
+                    topLeft = Offset(w * 0.6f, h * 0.12f),
+                    size = Size(w * 0.18f, h * 0.76f),
+                    cornerRadius = radius
+                )
+            }
+
+            TransportGlyph.STOP -> drawRoundRect(
+                tint,
+                topLeft = Offset(w * 0.2f, h * 0.2f),
+                size = Size(w * 0.6f, h * 0.6f),
+                cornerRadius = CornerRadius(w * 0.06f)
+            )
+
+            TransportGlyph.PREV -> {
+                drawRect(tint, topLeft = Offset(w * 0.14f, h * 0.14f), size = Size(w * 0.1f, h * 0.72f))
+                val path = Path().apply {
+                    moveTo(w * 0.88f, h * 0.14f)
+                    lineTo(w * 0.32f, h * 0.5f)
+                    lineTo(w * 0.88f, h * 0.86f)
+                    close()
+                }
+                drawPath(path, tint)
+            }
+
+            TransportGlyph.NEXT -> {
+                val path = Path().apply {
+                    moveTo(w * 0.12f, h * 0.14f)
+                    lineTo(w * 0.68f, h * 0.5f)
+                    lineTo(w * 0.12f, h * 0.86f)
+                    close()
+                }
+                drawPath(path, tint)
+                drawRect(tint, topLeft = Offset(w * 0.76f, h * 0.14f), size = Size(w * 0.1f, h * 0.72f))
+            }
+
+            TransportGlyph.LOOP -> {
+                drawArc(
+                    color = tint,
+                    startAngle = 35f,
+                    sweepAngle = 285f,
+                    useCenter = false,
+                    topLeft = Offset(w * 0.14f, h * 0.16f),
+                    size = Size(w * 0.72f, h * 0.68f),
+                    style = Stroke(width = stroke, cap = StrokeCap.Round)
+                )
+                val head = Path().apply {
+                    moveTo(w * 0.6f, h * 0.05f)
+                    lineTo(w * 0.94f, h * 0.19f)
+                    lineTo(w * 0.58f, h * 0.33f)
+                    close()
+                }
+                drawPath(head, tint)
+            }
+        }
+    }
+}
+
+/** Botón redondo del transporte, al estilo de un reproductor de vídeo. */
+@Composable
+private fun TransportButton(
+    glyph: TransportGlyph,
+    description: String,
+    enabled: Boolean = true,
+    active: Boolean = false,
+    primary: Boolean = false,
+    onClick: () -> Unit
+) {
+    val tint = when {
+        !enabled -> NdiGlass.Muted.copy(alpha = 0.35f)
+        primary -> Color(0xFF08131F)
+        active -> NdiGlass.BlueBright
+        else -> NdiGlass.Text
+    }
+    val fill = when {
+        !enabled -> Color(0x14FFFFFF)
+        primary -> NdiGlass.BlueBright
+        active -> Color(0x332E7BFF)
+        else -> Color(0x22FFFFFF)
+    }
+    Box(
+        Modifier
+            .size(if (primary) 54.dp else 44.dp)
+            .clip(CircleShape)
+            .background(fill)
+            .semantics { contentDescription = description }
+            .clickable(enabled = enabled) { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        TransportIcon(
+            glyph = glyph,
+            tint = tint,
+            modifier = Modifier.size(if (primary) 24.dp else 19.dp)
+        )
     }
 }
