@@ -1,6 +1,9 @@
 package com.ndiapp.camera.ndi
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
@@ -73,6 +76,18 @@ private fun receivedBytes(): Long {
     return if (total < 0) 0L else total
 }
 
+/** Bitmap del tamaño pedido, reutilizando el anterior cuando ya sirve. */
+private fun reusableBitmap(
+    current: Bitmap?,
+    width: Int,
+    height: Int,
+    store: (Bitmap) -> Unit
+): Bitmap = if (current != null && current.width == width && current.height == height) {
+    current
+} else {
+    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also(store)
+}
+
 /** Medidas del flujo recibido, actualizadas dos veces por segundo. */
 data class StreamStats(
     val fps: Float = 0f,
@@ -82,7 +97,9 @@ data class StreamStats(
     val audioRate: Int = 0,
     val audioChannels: Int = 0,
     val audioPackets: Int = 0,
-    val audioProblem: String = ""
+    val audioProblem: String = "",
+    val width: Int = 0,
+    val height: Int = 0
 )
 
 /** Recibe video y audio de una fuente NDI y los entrega a la UI. */
@@ -112,6 +129,8 @@ class NdiReceiverController {
         source: NdiSource,
         audioEnabled: () -> Boolean,
         lowBandwidth: Boolean = false,
+        /** Alto máximo del cuadro entregado a la UI; 0 deja el de la fuente. */
+        maxHeight: () -> Int = { 0 },
         onFrame: (Bitmap) -> Unit,
         onStats: (StreamStats) -> Unit = {}
     ) {
@@ -125,7 +144,15 @@ class NdiReceiverController {
         val pcmBuffer = FloatArray(48_000 * 2)
 
         job = scope.launch(Dispatchers.Default) {
-            var reusable: Bitmap? = null
+            var sourceFrame: Bitmap? = null
+            var scaledA: Bitmap? = null
+            var scaledB: Bitmap? = null
+            var useScaledB = false
+            val scalePaint = Paint().apply { isFilterBitmap = true }
+            val sourceRect = Rect()
+            val targetRect = Rect()
+            var shownWidth = 0
+            var shownHeight = 0
             var frames = 0
             var lastRx = receivedBytes()
             var audioRate = 0
@@ -141,21 +168,41 @@ class NdiReceiverController {
                         val height = poll[2]
                         if (width > 0 && height > 0) {
                             frames++
-                            withContext(Dispatchers.Main) {
-                                val existing = reusable
-                                val bitmap = if (existing == null || existing.width != width ||
-                                    existing.height != height
-                                ) {
-                                    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                                        .also { reusable = it }
-                                } else {
-                                    existing
-                                }
-                                bitmap.copyPixelsFromBuffer(
-                                    ByteBuffer.wrap(rgbaBuffer, 0, width * height * 4)
-                                )
-                                onFrame(bitmap)
+                            // La copia del RGBA y la reducción se hacen en este hilo:
+                            // al principal solo llega el cuadro ya listo para pintar.
+                            val limit = maxHeight()
+                            val outHeight = if (limit in 1 until height) limit else height
+                            val outWidth = if (outHeight == height) {
+                                width
+                            } else {
+                                ((width.toLong() * outHeight / height).toInt() and -2)
+                                    .coerceAtLeast(2)
                             }
+                            val full = reusableBitmap(sourceFrame, width, height) {
+                                sourceFrame = it
+                            }
+                            full.copyPixelsFromBuffer(
+                                ByteBuffer.wrap(rgbaBuffer, 0, width * height * 4)
+                            )
+                            val output = if (outWidth == width && outHeight == height) {
+                                full
+                            } else {
+                                // Dos bitmaps alternos: el visor pinta uno mientras se
+                                // escribe el otro, sin cortes ni asignaciones por cuadro.
+                                val slotB = useScaledB
+                                useScaledB = !useScaledB
+                                val spare = if (slotB) scaledB else scaledA
+                                val bitmap = reusableBitmap(spare, outWidth, outHeight) {
+                                    if (slotB) scaledB = it else scaledA = it
+                                }
+                                sourceRect.set(0, 0, width, height)
+                                targetRect.set(0, 0, outWidth, outHeight)
+                                Canvas(bitmap).drawBitmap(full, sourceRect, targetRect, scalePaint)
+                                bitmap
+                            }
+                            shownWidth = outWidth
+                            shownHeight = outHeight
+                            withContext(Dispatchers.Main) { onFrame(output) }
                         }
                     }
 
@@ -186,7 +233,9 @@ class NdiReceiverController {
                         audioRate = audioRate,
                         audioChannels = audioChannels,
                         audioPackets = audioPackets,
-                        audioProblem = audioProblem
+                        audioProblem = audioProblem,
+                        width = shownWidth,
+                        height = shownHeight
                     )
                     audioPackets = 0
                     levelLeft *= 0.6f

@@ -3242,6 +3242,12 @@ private fun MonitorTab(onMenu: () -> Unit) {
     val activity = LocalContext.current as? Activity
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("ndi_monitor", Context.MODE_PRIVATE) }
+    // Resolución de recepción NDI: 0 = la de la fuente, o el alto máximo pedido.
+    // El hilo de recepción lee el valor atómico, sin depender de la instantánea de Compose.
+    val rxHeightLimit = remember {
+        java.util.concurrent.atomic.AtomicInteger(prefs.getInt("ndi_rx_height", 0))
+    }
+    var rxHeight by remember { mutableIntStateOf(rxHeightLimit.get()) }
     var manualIps by remember {
         mutableStateOf(prefs.getStringSet("ips", emptySet())?.sorted().orEmpty())
     }
@@ -3272,6 +3278,7 @@ private fun MonitorTab(onMenu: () -> Unit) {
             source = chosen,
             audioEnabled = { audio },
             lowBandwidth = proxy,
+            maxHeight = { rxHeightLimit.get() },
             onFrame = { bitmap ->
                 frame = bitmap
                 frameSeq++
@@ -3486,7 +3493,12 @@ private fun MonitorTab(onMenu: () -> Unit) {
                                     .padding(14.dp)
                             )
                             Text(
-                                "${String.format("%.1f", stats.fps)} fps · " +
+                                (if (stats.width > 0) {
+                                    "${stats.width}×${stats.height} · "
+                                } else {
+                                    ""
+                                }) +
+                                    "${String.format("%.1f", stats.fps)} fps · " +
                                     "${String.format("%.1f", stats.mbps)} Mb/s",
                                 fontSize = 10.sp,
                                 color = NdiGlass.Muted,
@@ -3621,6 +3633,42 @@ private fun MonitorTab(onMenu: () -> Unit) {
                                 guides > 0
                             ) { guides = (guides + 1) % 5 }
                         }
+
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp)
+                                .horizontalScroll(rememberScrollState()),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                "Recepción",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = NdiGlass.Muted
+                            )
+                            listOf(0 to "Nativa", 720 to "720p", 540 to "540p")
+                                .forEach { option ->
+                                    GlassChip(option.second, rxHeight == option.first) {
+                                        rxHeight = option.first
+                                        rxHeightLimit.set(option.first)
+                                        prefs.edit()
+                                            .putInt("ndi_rx_height", option.first)
+                                            .apply()
+                                    }
+                                }
+                        }
+                        Text(
+                            when (rxHeight) {
+                                720 -> "720p: el visor mueve el 44 % de los píxeles de un " +
+                                    "cuadro 1080p."
+                                540 -> "540p: el visor mueve el 25 % de los píxeles de un " +
+                                    "cuadro 1080p."
+                                else -> "Nativa: el cuadro llega al tamaño de la fuente."
+                            } + " El caudal de red solo baja con el chip Proxy.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NdiGlass.Muted
+                        )
 
                         if (sources.isEmpty()) {
                             Text(
