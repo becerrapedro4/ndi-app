@@ -252,9 +252,9 @@ class ScreenCaptureService : Service() {
     private fun startAudio(mediaProjection: MediaProjection, audioMode: Int) {
         when (audioMode) {
             AUDIO_MIC -> {
-                mic = AudioCapture { pcm, samples, channels, rate ->
+                mic = AudioCapture(this, onBuffer = { pcm, samples, channels, rate ->
                     sender?.sendAudio(pcm, samples, channels, rate)
-                }.also { it.start() }
+                }).also { it.start() }
             }
 
             AUDIO_SYSTEM -> {

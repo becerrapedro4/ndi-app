@@ -101,9 +101,9 @@ class AudioNdiSource(private val context: Context) {
         stop()
         val created = createSender(name) ?: return false
         sender = created
-        val capture = AudioCapture { pcm, samples, channels, rate ->
+        val capture = AudioCapture(context, onBuffer = { pcm, samples, channels, rate ->
             sender?.sendAudio(pcm, samples, channels, rate)
-        }
+        })
         capture.start()
         mic = capture
         handler.post(pump)
