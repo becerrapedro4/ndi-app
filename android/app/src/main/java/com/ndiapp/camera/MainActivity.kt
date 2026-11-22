@@ -2520,49 +2520,55 @@ private fun MenuSheet(
             HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
             Spacer(Modifier.height(12.dp))
 
-            MenuEntry(
-                icon = DockIcon.HIDE,
-                title = "Monitor NDI",
-                subtitle = "Ver las fuentes NDI de la red",
-                selected = screen == Screen.MONITOR
-            ) { onSelect(Screen.MONITOR) }
-            MenuEntry(
-                icon = DockIcon.MIC,
-                title = "Cámara",
-                subtitle = "Transmitir la cámara como fuente NDI",
-                selected = screen == Screen.CAMERA
-            ) { onSelect(Screen.CAMERA) }
-            MenuEntry(
-                icon = DockIcon.GRID,
-                title = "Pantalla",
-                subtitle = "Compartir la pantalla con audio del sistema",
-                selected = screen == Screen.SCREEN
-            ) { onSelect(Screen.SCREEN) }
-            MenuEntry(
-                icon = DockIcon.MEDIA,
-                title = "Multimedia",
-                subtitle = "Archivos por NDI y cámaras USB",
-                selected = screen == Screen.MULTIMEDIA
-            ) { onSelect(Screen.MULTIMEDIA) }
-            MenuEntry(
-                icon = DockIcon.MIC,
-                title = "Audio",
-                subtitle = "Micrófono o archivo como fuente de audio",
-                selected = screen == Screen.AUDIO
-            ) { onSelect(Screen.AUDIO) }
-            MenuEntry(
-                icon = DockIcon.MEDIA,
-                title = "Captura UVC",
-                subtitle = "Cámara USB como fuente NDI",
-                selected = screen == Screen.UVC
-            ) { onSelect(Screen.UVC) }
-            MenuEntry(
-                icon = DockIcon.SETTINGS,
-                title = "SRT",
-                subtitle = "URL de la salida SRT de la cámara",
-                selected = screen == Screen.SRT
-            ) { onSelect(Screen.SRT) }
-            Spacer(Modifier.weight(1f))
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                MenuEntry(
+                    icon = DockIcon.HIDE,
+                    title = "Monitor NDI",
+                    subtitle = "Ver las fuentes NDI de la red",
+                    selected = screen == Screen.MONITOR
+                ) { onSelect(Screen.MONITOR) }
+                MenuEntry(
+                    icon = DockIcon.MIC,
+                    title = "Cámara",
+                    subtitle = "Transmitir la cámara como fuente NDI",
+                    selected = screen == Screen.CAMERA
+                ) { onSelect(Screen.CAMERA) }
+                MenuEntry(
+                    icon = DockIcon.GRID,
+                    title = "Pantalla",
+                    subtitle = "Compartir la pantalla con audio del sistema",
+                    selected = screen == Screen.SCREEN
+                ) { onSelect(Screen.SCREEN) }
+                MenuEntry(
+                    icon = DockIcon.MEDIA,
+                    title = "Multimedia",
+                    subtitle = "Archivos por NDI y cámaras USB",
+                    selected = screen == Screen.MULTIMEDIA
+                ) { onSelect(Screen.MULTIMEDIA) }
+                MenuEntry(
+                    icon = DockIcon.MIC,
+                    title = "Audio",
+                    subtitle = "Micrófono o archivo como fuente de audio",
+                    selected = screen == Screen.AUDIO
+                ) { onSelect(Screen.AUDIO) }
+                MenuEntry(
+                    icon = DockIcon.MEDIA,
+                    title = "Captura UVC",
+                    subtitle = "Cámara USB como fuente NDI",
+                    selected = screen == Screen.UVC
+                ) { onSelect(Screen.UVC) }
+                MenuEntry(
+                    icon = DockIcon.SETTINGS,
+                    title = "SRT",
+                    subtitle = "URL de la salida SRT de la cámara",
+                    selected = screen == Screen.SRT
+                ) { onSelect(Screen.SRT) }
+            }
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
             Spacer(Modifier.height(10.dp))
             Text(
