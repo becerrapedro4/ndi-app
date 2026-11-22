@@ -59,6 +59,13 @@ class SrtTransmitter {
     private var aacRate = 0
     private var aacFailure = ""
     private var fps = 30
+
+    // Calidad pedida desde los ajustes: 0 = tamaño nativo y tasa automática.
+    @Volatile
+    private var limitHeight = 0
+
+    @Volatile
+    private var bitrate = 0
     private val muxer = TsMuxer()
     private val queue = ArrayBlockingQueue<ByteArray>(90)
     private var writer: Thread? = null
@@ -130,10 +137,25 @@ class SrtTransmitter {
         }
     }
 
+    /**
+     * Fija la resolución máxima y la tasa de bits del H.264. Se puede llamar con
+     * la emisión en marcha: el codificador se rehace con el tamaño nuevo y el
+     * socket no se corta.
+     */
+    fun setVideoLimit(maxHeight: Int, bitRate: Int) {
+        val height = maxHeight.coerceAtLeast(0)
+        val rate = bitRate.coerceAtLeast(0)
+        if (height == limitHeight && rate == bitrate) return
+        limitHeight = height
+        bitrate = rate
+        releaseEncoder()
+    }
+
     fun send(frame: YuvFrame) {
         if (!running || !connected) return
         if (frame.width <= 0 || frame.height <= 0) return
-        ensureEncoder(frame.width, frame.height)
+        val (targetWidth, targetHeight) = targetSize(frame.width, frame.height)
+        ensureEncoder(targetWidth, targetHeight)
         val current = encoder ?: return
         submitted++
         current.submit(frame)
@@ -166,13 +188,24 @@ class SrtTransmitter {
      * variante de color funciona se deja anotado el tamaño para no reintentar
      * en cada cuadro.
      */
+    /** Tamaño de salida: el nativo o el que quepa en la resolución elegida. */
+    private fun targetSize(sourceWidth: Int, sourceHeight: Int): Pair<Int, Int> {
+        val max = limitHeight
+        if (max <= 0 || sourceHeight <= max) return sourceWidth to sourceHeight
+        val targetHeight = (max - max % 2).coerceAtLeast(2)
+        val scaled = ((sourceWidth.toLong() * targetHeight + sourceHeight / 2) / sourceHeight).toInt()
+        return (scaled - scaled % 2).coerceAtLeast(2) to targetHeight
+    }
+
     @Synchronized
     private fun ensureEncoder(width: Int, height: Int) {
         if (width == encoderWidth && height == encoderHeight) return
         val previous = encoder
         encoder = null
         previous?.release()
-        val bitrate = when {
+        val bitrate = if (this.bitrate > 0) {
+            this.bitrate
+        } else when {
             height >= 1080 -> 6_000_000
             height >= 720 -> 4_000_000
             else -> 2_500_000

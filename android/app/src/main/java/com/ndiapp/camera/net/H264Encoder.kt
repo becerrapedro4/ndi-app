@@ -40,6 +40,10 @@ class H264Encoder(
     private val u = ByteArray(width * height / 4)
     private val v = ByteArray(width * height / 4)
 
+    // Filas de origen para reducir el cuadro sin leer byte a byte del búfer.
+    private var rowBuffer = ByteArray(0)
+    private var chromaRowBuffer = ByteArray(0)
+
     private var spsPps: ByteArray? = null
 
     private val semiPlanar: Boolean = preferSemiPlanar && runCatching {
@@ -82,7 +86,14 @@ class H264Encoder(
     fun submit(frame: YuvFrame) {
         if (!isRunning) return
         try {
-            if (semiPlanar) buildNv12(frame) else buildI420(frame)
+            // Si la cámara entrega más resolución que la elegida, se reduce al
+            // vuelo; el codificador siempre recibe el tamaño configurado.
+            val scaled = frame.width != width || frame.height != height
+            if (semiPlanar) {
+                if (scaled) buildNv12Scaled(frame) else buildNv12(frame)
+            } else {
+                if (scaled) buildI420Scaled(frame) else buildI420(frame)
+            }
             // Un poco de espera: con 0 ms el codificador descartaba cuadros
             // mientras terminaba de arrancar y la salida quedaba en 0 fps.
             val index = codec.dequeueInputBuffer(10_000)
@@ -226,6 +237,124 @@ class H264Encoder(
             for (column in 0 until chromaWidth) {
                 v[index++] = frame.v.get(position)
                 position += frame.vPixelStride
+            }
+        }
+    }
+
+    /** NV12 reducido por muestreo de filas: se lee una fila de origen por fila. */
+    private fun buildNv12Scaled(frame: YuvFrame) {
+        val srcWidth = frame.width
+        val srcHeight = frame.height
+        if (rowBuffer.size < srcWidth) rowBuffer = ByteArray(srcWidth)
+        val luma = frame.y
+        val savedY = luma.position()
+        for (row in 0 until height) {
+            val sourceRow = row * srcHeight / height
+            val base = sourceRow * frame.yRowStride
+            val dest = row * width
+            if (frame.yPixelStride == 1) {
+                luma.position(base)
+                luma.get(rowBuffer, 0, srcWidth)
+                if (srcWidth == width) {
+                    System.arraycopy(rowBuffer, 0, nv12, dest, width)
+                } else {
+                    for (column in 0 until width) {
+                        nv12[dest + column] = rowBuffer[column * srcWidth / width]
+                    }
+                }
+            } else {
+                for (column in 0 until width) {
+                    val sourceColumn = column * srcWidth / width
+                    nv12[dest + column] = luma.get(base + sourceColumn * frame.yPixelStride)
+                }
+            }
+        }
+        luma.position(savedY)
+
+        val srcChromaWidth = srcWidth / 2
+        val srcChromaHeight = srcHeight / 2
+        val chromaWidth = width / 2
+        val chromaHeight = height / 2
+        val uvBase = width * height
+        if (frame.uPixelStride == 2 && frame.vPixelStride == 2) {
+            val needed = srcChromaWidth * 2
+            if (chromaRowBuffer.size < needed) chromaRowBuffer = ByteArray(needed)
+            val chroma = frame.u
+            val savedU = chroma.position()
+            for (row in 0 until chromaHeight) {
+                val sourceRow = row * srcChromaHeight / chromaHeight
+                val base = sourceRow * frame.uRowStride
+                var dest = uvBase + row * width
+                chroma.position(base)
+                chroma.get(chromaRowBuffer, 0, needed)
+                if (srcChromaWidth == chromaWidth) {
+                    System.arraycopy(chromaRowBuffer, 0, nv12, dest, needed)
+                } else {
+                    for (column in 0 until chromaWidth) {
+                        val sourceColumn = column * srcChromaWidth / chromaWidth
+                        nv12[dest++] = chromaRowBuffer[sourceColumn * 2]
+                        nv12[dest++] = chromaRowBuffer[sourceColumn * 2 + 1]
+                    }
+                }
+            }
+            chroma.position(savedU)
+        } else {
+            for (row in 0 until chromaHeight) {
+                val sourceRow = row * srcChromaHeight / chromaHeight
+                val uBase = sourceRow * frame.uRowStride
+                val vBase = sourceRow * frame.vRowStride
+                var dest = uvBase + row * width
+                for (column in 0 until chromaWidth) {
+                    val sourceColumn = column * srcChromaWidth / chromaWidth
+                    nv12[dest++] = frame.u.get(uBase + sourceColumn * frame.uPixelStride)
+                    nv12[dest++] = frame.v.get(vBase + sourceColumn * frame.vPixelStride)
+                }
+            }
+        }
+    }
+
+    /** I420 reducido por muestreo, para codificadores sin NV12. */
+    private fun buildI420Scaled(frame: YuvFrame) {
+        val srcWidth = frame.width
+        val srcHeight = frame.height
+        if (rowBuffer.size < srcWidth) rowBuffer = ByteArray(srcWidth)
+        var index = 0
+        for (row in 0 until height) {
+            val sourceRow = row * srcHeight / height
+            val base = sourceRow * frame.yRowStride
+            if (frame.yPixelStride == 1) {
+                frame.y.position(base)
+                frame.y.get(rowBuffer, 0, srcWidth)
+                for (column in 0 until width) {
+                    y[index++] = rowBuffer[column * srcWidth / width]
+                }
+            } else {
+                for (column in 0 until width) {
+                    val sourceColumn = column * srcWidth / width
+                    y[index++] = frame.y.get(base + sourceColumn * frame.yPixelStride)
+                }
+            }
+        }
+        val srcChromaWidth = srcWidth / 2
+        val srcChromaHeight = srcHeight / 2
+        val chromaWidth = width / 2
+        val chromaHeight = height / 2
+        index = 0
+        for (row in 0 until chromaHeight) {
+            val sourceRow = row * srcChromaHeight / chromaHeight
+            val base = sourceRow * frame.uRowStride
+            for (column in 0 until chromaWidth) {
+                val sourceColumn = column * srcChromaWidth / chromaWidth
+                u[index++] = frame.u.get(base + sourceColumn * frame.uPixelStride)
+            }
+        }
+        index = 0
+        for (row in 0 until chromaHeight) {
+            val sourceRow = row * srcChromaHeight / chromaHeight
+            val base = sourceRow * frame.vRowStride
+            for (column in 0 until chromaWidth) {
+                val sourceColumn = column * srcChromaWidth / chromaWidth
+                v[index++] = frame.v.get(base + sourceColumn * frame.vPixelStride)
             }
         }
     }

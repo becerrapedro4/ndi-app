@@ -443,7 +443,10 @@ private fun AppRoot() {
                 Screen.SRT -> SrtTab(
                     onMenu = { scope.launch { drawerState.open() } },
                     srtUrl = camera.srtTxUrl,
-                    onSrtUrl = { url -> camera.setSrtTxUrl(url) }
+                    onSrtUrl = { url -> camera.setSrtTxUrl(url) },
+                    srtHeight = camera.srtHeight,
+                    srtBitrate = camera.srtBitrate,
+                    onSrtVideo = { height, bitrate -> camera.setSrtVideo(height, bitrate) }
                 )
             }
 
@@ -574,9 +577,13 @@ private class CameraUi(val appContext: Context) {
     // Estado del socket y contadores de envío: dice en qué etapa se corta.
     var srtTxDiag by mutableStateOf("")
     var srtTxNotice by mutableStateOf<String?>(null)
+    // Calidad del H.264 de SRT: 0 = tamaño nativo y tasa automática.
+    var srtHeight by mutableIntStateOf(prefs.getInt("srt_height", 0))
+    var srtBitrate by mutableIntStateOf(prefs.getInt("srt_bitrate", 0))
 
     init {
         session.setSurfaceView(surfaceView)
+        srtTx.setVideoLimit(srtHeight, srtBitrate)
     }
 
     var running by mutableStateOf(false)
@@ -991,6 +998,14 @@ private fun CameraUi.setSrtTxUrl(url: String) {
     prefs.edit().putString("srt_tx", srtTxUrl).apply()
 }
 
+/** Resolución y tasa de bits del H.264 de SRT; se aplican al momento. */
+private fun CameraUi.setSrtVideo(height: Int, bitrate: Int) {
+    srtHeight = height
+    srtBitrate = bitrate
+    prefs.edit().putInt("srt_height", height).putInt("srt_bitrate", bitrate).apply()
+    srtTx.setVideoLimit(height, bitrate)
+}
+
 /** Arranca o corta la transmisión SRT hacia la URL configurada. */
 private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
     if (srtTxRunning) {
@@ -1054,8 +1069,9 @@ private fun CameraUi.toggleSrtTx(lifecycleOwner: LifecycleOwner) {
             session.releaseAudioCaptureIfIdle()
         }
     }
-    // El tamaño del codificador sale del primer cuadro: si cambiás de lente,
-    // encuadre o calidad, se rehace solo sin cortar el socket.
+    // El tamaño del codificador sale del primer cuadro y de la calidad elegida:
+    // si cambiás de lente, encuadre o calidad, se rehace solo sin cortar el socket.
+    srtTx.setVideoLimit(srtHeight, srtBitrate)
     srtTx.start(srtTxUrl, fps)
     srtTxRunning = true
 }
@@ -4439,7 +4455,14 @@ private fun MediaTab(onMenu: () -> Unit) {
 
 /** Configuración de la salida SRT, en su propia pestaña del menú. */
 @Composable
-private fun SrtTab(onMenu: () -> Unit, srtUrl: String, onSrtUrl: (String) -> Unit) {
+private fun SrtTab(
+    onMenu: () -> Unit,
+    srtUrl: String,
+    onSrtUrl: (String) -> Unit,
+    srtHeight: Int,
+    srtBitrate: Int,
+    onSrtVideo: (Int, Int) -> Unit
+) {
     val context = LocalContext.current
     val net = remember { localNetwork(context) }
     Column(Modifier.fillMaxSize()) {
@@ -4472,6 +4495,76 @@ private fun SrtTab(onMenu: () -> Unit, srtUrl: String, onSrtUrl: (String) -> Uni
                 Text(
                     "El botón naranja del visor de la cámara arranca y corta la salida. " +
                         "El estado del socket y los MB enviados se muestran sobre el visor.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NdiGlass.Muted
+                )
+            }
+            GlassPanel {
+                Text(
+                    "Calidad del envío",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = NdiGlass.Text
+                )
+                Text(
+                    "Resolución y tasa de bits del H.264 que sale por SRT. Se aplican al " +
+                        "instante, también con la emisión en marcha. Solo afectan a SRT: NDI " +
+                        "sale con la resolución del visor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NdiGlass.Muted
+                )
+                Text(
+                    "Resolución",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = NdiGlass.Text
+                )
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        0 to "Nativa",
+                        1080 to "1080p",
+                        720 to "720p",
+                        540 to "540p",
+                        480 to "480p"
+                    ).forEach { (value, label) ->
+                        GlassChip(label, srtHeight == value, accent = SrtOrange) {
+                            onSrtVideo(value, srtBitrate)
+                        }
+                    }
+                }
+                Text(
+                    "Tasa de bits de vídeo",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = NdiGlass.Text
+                )
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        0 to "Auto",
+                        1_500_000 to "1,5 Mb/s",
+                        2_500_000 to "2,5 Mb/s",
+                        4_000_000 to "4 Mb/s",
+                        6_000_000 to "6 Mb/s",
+                        8_000_000 to "8 Mb/s"
+                    ).forEach { (value, label) ->
+                        GlassChip(label, srtBitrate == value, accent = SrtOrange) {
+                            onSrtVideo(srtHeight, value)
+                        }
+                    }
+                }
+                Text(
+                    if (srtBitrate > 0) {
+                        String.format(
+                            java.util.Locale.US,
+                            "Sale a %.1f Mb/s de vídeo (más 128 kb/s de audio).",
+                            srtBitrate / 1_000_000f
+                        )
+                    } else {
+                        "Automática: 6 Mb/s a 1080p, 4 Mb/s a 720p y 2,5 Mb/s por debajo."
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = NdiGlass.Muted
                 )
