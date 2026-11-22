@@ -62,7 +62,11 @@ class UvcStreamer(
         private const val GET_CUR = 0x81
         private const val SET_CUR = 0x01
         private const val ISOC_REQUESTS = 12
+        private const val MAX_FRAME_BYTES = 4 * 1024 * 1024
     }
+
+    /** Cómo terminó un intento de lectura isocrona. */
+    private enum class IsoStart { STREAMED, QUEUE_FAILED, INIT_FAILED, NO_DATA }
 
     private var connection: UsbDeviceConnection? = null
     private var thread: Thread? = null
@@ -126,6 +130,8 @@ class UvcStreamer(
         var chosenInterface: UsbInterface? = null
         var chosenEndpoint: UsbEndpoint? = null
         var chosenBulk = false
+        // Cada alt setting con su endpoint: si uno no entrega imagen se prueba el otro.
+        val isoAlternates = mutableListOf<Pair<UsbInterface, UsbEndpoint>>()
         for (index in 0 until device.interfaceCount) {
             val candidate = device.getInterface(index)
             if (candidate.id != topology.streamingInterface || candidate.alternateSetting == 0) {
@@ -146,6 +152,9 @@ class UvcStreamer(
                 }
             }
             val endpoint = bestEndpoint ?: continue
+            if (endpoint.type == UsbConstants.USB_ENDPOINT_XFER_ISOC) {
+                isoAlternates.add(candidate to endpoint)
+            }
             val bulk = endpoint.type == UsbConstants.USB_ENDPOINT_XFER_BULK
             val current = chosenEndpoint
             val better = when {
@@ -169,6 +178,7 @@ class UvcStreamer(
             return fail("La cámara no expone un endpoint de vídeo utilizable")
         }
         isBulk = chosenBulk
+        isoAlternates.sortByDescending { it.second.maxPacketSize }
 
         if (!conn.claimInterface(streamInterface, true)) {
             conn.close()
@@ -203,7 +213,7 @@ class UvcStreamer(
         running = true
         val worker = Thread {
             try {
-                if (isBulk) runBulk(conn, endpoint) else runIsochronous(conn, endpoint)
+                if (isBulk) runBulk(conn, endpoint) else runIsochronous(conn, isoAlternates)
             } catch (t: Throwable) {
                 if (running) {
                     Log.w(TAG, "Lectura UVC interrumpida", t)
@@ -246,49 +256,187 @@ class UvcStreamer(
         }
     }
 
-    private fun runIsochronous(conn: UsbDeviceConnection, endpoint: UsbEndpoint) {
-        val size = bufferSize
+    /**
+     * Lectura isocrona. El kernel arma los paquetes dividiendo el buffer entre el
+     * wMaxPacketSize crudo del descriptor, así que un tamaño que no sea múltiplo
+     * suyo se rechaza al encolar (era el caso de los 1024 B con alt 3). Se prueban
+     * varios tamaños y, si un alt setting no entrega imagen, se pasa al siguiente.
+     */
+    private fun runIsochronous(
+        conn: UsbDeviceConnection,
+        alternates: List<Pair<UsbInterface, UsbEndpoint>>
+    ) {
+        var detail = "la cámara no expone un endpoint isocrono utilizable"
+        for ((iface, endpoint) in alternates) {
+            if (!running) return
+            if (!conn.setInterface(iface)) {
+                detail = "el teléfono no activó el alt ${iface.alternateSetting}"
+                continue
+            }
+            altSetting = iface.alternateSetting
+            interfaceReady = true
+            val sizes = isocSizes(endpoint)
+            for (size in sizes) {
+                if (!running) return
+                Log.i(TAG, "Isoc alt ${iface.alternateSetting}: pruebo $size B")
+                when (pumpIsochronous(conn, endpoint, size)) {
+                    IsoStart.STREAMED -> return
+                    IsoStart.QUEUE_FAILED ->
+                        detail = "no se pudo encolar la lectura isocrona ($size B, " +
+                            "alt ${iface.alternateSetting})"
+                    IsoStart.INIT_FAILED ->
+                        detail = "el endpoint isocrono rechazó la petición " +
+                            "(alt ${iface.alternateSetting})"
+                    IsoStart.NO_DATA ->
+                        detail = "la cámara no envió datos ($size B, " +
+                            "alt ${iface.alternateSetting})"
+                }
+            }
+        }
+        if (running) {
+            onStatus(
+                "$detail · ya probé todas las variantes isocronas de esta cámara. " +
+                    "Los hubs y adaptadores suelen romper este modo: probá un cable " +
+                    "directo al USB-C del teléfono y, si sigue, una resolución menor."
+            )
+        }
+    }
+
+    /**
+     * Un intento completo: encola ISOC_REQUESTS lecturas del tamaño dado y bombea
+     * hasta que se corta. Si la cola se acepta pero no llega nada, un vigilante
+     * cancela una petición para no quedarse esperando para siempre.
+     */
+    private fun pumpIsochronous(
+        conn: UsbDeviceConnection,
+        endpoint: UsbEndpoint,
+        size: Int
+    ): IsoStart {
         val requests = ArrayList<UsbRequest>(ISOC_REQUESTS)
         val buffers = ArrayList<ByteBuffer>(ISOC_REQUESTS)
         for (index in 0 until ISOC_REQUESTS) {
             val request = UsbRequest()
-            if (!request.initialize(conn, endpoint)) break
+            if (!request.initialize(conn, endpoint)) {
+                runCatching { request.close() }
+                closeRequests(requests)
+                return IsoStart.INIT_FAILED
+            }
             val buffer = ByteBuffer.allocateDirect(size)
-            if (!request.queue(buffer, size)) break
+            if (!request.queue(buffer, size)) {
+                Log.w(TAG, "queue rechazado: $size B")
+                runCatching { request.close() }
+                closeRequests(requests)
+                return IsoStart.QUEUE_FAILED
+            }
             requests.add(request)
             buffers.add(buffer)
         }
-        if (requests.isEmpty()) {
-            // Android rechaza la cola isocrona cuando no pudo activar el alt
-            // setting, cuando el cable no aguanta el ancho de banda o cuando el
-            // concentrador no da el turno. El aviso dice cuál de los tres mirar.
-            val pista = if (interfaceReady) {
-                "revisa el cable y el puerto USB"
-            } else {
-                "el teléfono no activó el alt $altSetting: revisa el cable o el puerto"
+
+        val chunk = ByteArray(size)
+        val raw = endpoint.maxPacketSize and 0xFFFF
+        // Cada paquete ocupa su slot completo dentro del buffer leído.
+        val stride = if (raw in 1..size) raw else size
+        val received = java.util.concurrent.atomic.AtomicInteger(0)
+        val watchdog = Thread {
+            runCatching { Thread.sleep(4_000L) }
+            val muted = Thread.currentThread().isInterrupted
+            if (!muted && running && received.get() == 0) {
+                runCatching { requests.firstOrNull()?.cancel() }
             }
-            onStatus("No se pudo encolar la lectura isocrona ($size B, alt $altSetting) · $pista")
-            return
         }
-        val data = ByteArray(size)
+        watchdog.isDaemon = true
+        watchdog.name = "uvc-isoc-watch"
+        watchdog.start()
+
+        var packets = 0
         while (running) {
             val done = runCatching { conn.requestWait() }.getOrNull() ?: break
             val index = requests.indexOf(done)
             if (index < 0) continue
             val buffer = buffers[index]
             buffer.position(0)
-            buffer.get(data)
-            handlePacket(data, size, isIsochronous = true)
-            java.util.Arrays.fill(data, 0)
+            buffer.get(chunk)
+            packets++
+            received.incrementAndGet()
+            handleIsoPackets(chunk, size, stride)
+            java.util.Arrays.fill(chunk, 0)
             buffer.clear()
-            buffer.put(data)
+            buffer.put(chunk)
             buffer.position(0)
             if (!running) break
             if (!done.queue(buffer, size)) break
         }
+        watchdog.interrupt()
+        closeRequests(requests)
+        return if (packets > 0) IsoStart.STREAMED else IsoStart.NO_DATA
+    }
+
+    private fun closeRequests(requests: List<UsbRequest>) {
         for (request in requests) {
             runCatching { request.cancel() }
             runCatching { request.close() }
+        }
+    }
+
+    /**
+     * Tamaños de buffer a probar. Primero múltiplos del wMaxPacketSize crudo (lo
+     * que espera el kernel) y después los bytes reales por microframe, por si el
+     * descriptor viene con los bits de transacciones por microframe.
+     */
+    private fun isocSizes(endpoint: UsbEndpoint): List<Int> {
+        val raw = endpoint.maxPacketSize and 0xFFFF
+        val low = raw and 0x7FF
+        val mult = ((raw shr 11) and 0x03).let { if (it == 0) 1 else it + 1 }
+        val perMicroframe = (low * mult).coerceAtLeast(1)
+        val sizes = linkedSetOf<Int>()
+        if (raw > 0) {
+            for (packets in intArrayOf(8, 4, 2, 1)) {
+                val size = raw * packets
+                if (size in 1..(512 * 1024)) sizes.add(size)
+            }
+        }
+        for (packets in intArrayOf(8, 4)) {
+            val size = perMicroframe * packets
+            if (size in 1..(512 * 1024)) sizes.add(size)
+        }
+        if (sizes.isEmpty()) sizes.add(8192)
+        return sizes.toList()
+    }
+
+    /**
+     * Cada slot del buffer leído es un paquete isocrono con su propia cabecera de
+     * payload UVC: se recorre por tramos fijos en vez de tomar sólo el primero.
+     */
+    private fun handleIsoPackets(data: ByteArray, length: Int, stride: Int) {
+        val step = if (stride > 0) stride else length
+        var offset = 0
+        while (offset + 2 <= length) {
+            val first = data[offset].toInt() and 0xFF
+            val info = data[offset + 1].toInt() and 0xFF
+            val headerLength = if (first == 0xFF) {
+                if (offset + 3 > length) return
+                data[offset + 2].toInt() and 0xFF
+            } else {
+                first
+            }
+            if (headerLength < 2 || offset + headerLength > length) return
+
+            val fid = info and 0x01
+            val endOfFrame = info and 0x02 != 0
+            val error = info and 0x40 != 0
+
+            if (fid != lastFid && frameBuffer.size() > 0) closeFrame()
+            lastFid = fid
+            val start = offset + headerLength
+            val end = (offset + step).coerceAtMost(length)
+            if (!error && end > start) {
+                if (frameBuffer.size() + (end - start) > MAX_FRAME_BYTES) {
+                    frameBuffer.reset()
+                }
+                frameBuffer.write(data, start, end - start)
+            }
+            if (endOfFrame) closeFrame()
+            offset += step
         }
     }
 
