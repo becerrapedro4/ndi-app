@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.net.TrafficStats
+import android.os.Process
 import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +46,16 @@ class NdiFinder {
 }
 
 data class NdiSource(val name: String, val fullName: String, val url: String)
+
+/**
+ * Bytes que el sistema entregó a la app. El SDK de NDI no informa el caudal del
+ * flujo recibido y el cuadro llega ya decodificado en RGBA, así que sumar su
+ * tamaño daba cifras imposibles (4 Gb/s a 1080p60). Esto mide la red de verdad.
+ */
+private fun receivedBytes(): Long {
+    val total = TrafficStats.getUidRxBytes(Process.myUid())
+    return if (total < 0) 0L else total
+}
 
 /** Medidas del flujo recibido, actualizadas dos veces por segundo. */
 data class StreamStats(
@@ -93,7 +105,7 @@ class NdiReceiverController {
         job = scope.launch(Dispatchers.Default) {
             var reusable: Bitmap? = null
             var frames = 0
-            var bytes = 0L
+            var lastRx = receivedBytes()
             var audioRate = 0
             var audioChannels = 0
             var audioPackets = 0
@@ -107,7 +119,6 @@ class NdiReceiverController {
                         val height = poll[2]
                         if (width > 0 && height > 0) {
                             frames++
-                            bytes += width.toLong() * height * 4
                             withContext(Dispatchers.Main) {
                                 val existing = reusable
                                 val bitmap = if (existing == null || existing.width != width ||
@@ -141,9 +152,13 @@ class NdiReceiverController {
                 val elapsed = now - windowStart
                 if (elapsed >= 500) {
                     val seconds = elapsed / 1000f
+                    // Caudal real: diferencia de bytes recibidos en la ventana.
+                    val rx = receivedBytes()
+                    val delta = if (rx >= lastRx) rx - lastRx else 0L
+                    lastRx = rx
                     val stats = StreamStats(
                         fps = frames / seconds,
-                        mbps = (bytes * 8f / 1_000_000f) / seconds,
+                        mbps = delta * 8f / 1_000_000f / seconds,
                         levelLeft = levelLeft,
                         levelRight = levelRight,
                         audioRate = audioRate,
@@ -155,7 +170,6 @@ class NdiReceiverController {
                     levelLeft *= 0.6f
                     levelRight *= 0.6f
                     frames = 0
-                    bytes = 0
                     windowStart = now
                     withContext(Dispatchers.Main) { onStats(stats) }
                 }
