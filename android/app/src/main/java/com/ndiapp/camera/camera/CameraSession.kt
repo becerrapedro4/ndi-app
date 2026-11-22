@@ -116,6 +116,12 @@ class CameraSession(private val context: Context) {
      */
     var onAudioFrame: ((FloatArray, Int, Int, Int) -> Unit)? = null
 
+    /** Nivel de pico del micrófono (izquierda, derecha) para el medidor. */
+    var onAudioLevel: ((Float, Float) -> Unit)? = null
+
+    /** Ganancia del micrófono aplicada antes de NDI y SRT. */
+    private var audioGain = 1f
+
     /** La salida SRT sigue usando el micrófono: cortar NDI no lo suelta. */
     @Volatile
     var keepAudioForSrt = false
@@ -190,6 +196,10 @@ class CameraSession(private val context: Context) {
 
     val isStreaming: Boolean
         get() = sender != null
+
+    /** Fps reales que está entregando el sensor (0 si aún no hay medida). */
+    val measuredFps: Float
+        get() = camera2Source?.measuredFps ?: 0f
 
     private var request: CameraRequest? = null
     private var provider: ProcessCameraProvider? = null
@@ -598,12 +608,63 @@ class CameraSession(private val context: Context) {
 
     private fun startAudio(req: CameraRequest) {
         if (audio != null) return
-        audio = AudioCapture { pcm, samples, channels, rate ->
-            if (!muted) {
-                sender?.sendAudio(pcm, samples, channels, rate)
-                onAudioFrame?.invoke(pcm, samples, channels, rate)
+        val capture = AudioCapture(
+            context,
+            onBuffer = { pcm, samples, channels, rate ->
+                if (!muted) {
+                    sender?.sendAudio(pcm, samples, channels, rate)
+                    onAudioFrame?.invoke(pcm, samples, channels, rate)
+                }
+            },
+            onLevel = { left, right ->
+                if (!muted) onAudioLevel?.invoke(left, right)
             }
-        }.also { it.start() }
+        )
+        capture.gain = audioGain
+        audio = capture.also { it.start() }
+    }
+
+    /** Ganancia de entrada del micrófono, de 0,1× a 8×. */
+    fun setAudioGain(gain: Float) {
+        audioGain = gain.coerceIn(0.1f, 8f)
+        audio?.gain = audioGain
+    }
+
+    /** Estabilización: 0 = ninguna, 1 = vídeo, 2 = óptica (OIS si la hay). */
+    fun setStabilization(mode: Int) {
+        val hidden = camera2Source
+        if (hidden != null) {
+            hidden.setStabilization(mode)
+            return
+        }
+        val builder = CaptureRequestOptions.Builder()
+        val optical = mode == 2
+        val video = mode == 1
+        builder.setCaptureRequestOption(
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+            if (optical) CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            else CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+        )
+        builder.setCaptureRequestOption(
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+            if (video) CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            else CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+        )
+        runCatching { camera2Control?.addCaptureRequestOptions(builder.build()) }
+    }
+
+    /** Antibanding: AUTO, 50 Hz o 60 Hz (CONTROL_AE_ANTIBANDING_MODE_*). */
+    fun setAntibanding(mode: Int) {
+        val hidden = camera2Source
+        if (hidden != null) {
+            hidden.setAntibanding(mode)
+            return
+        }
+        camera2Control?.addCaptureRequestOptions(
+            CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, mode)
+                .build()
+        )
     }
 
     /** Corta la emisión NDI y deja la vista previa en marcha. */

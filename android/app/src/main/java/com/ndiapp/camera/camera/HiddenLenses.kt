@@ -13,8 +13,8 @@ import java.util.Locale
 /**
  * Lente física que el sistema no expone como cámara propia: vive dentro de una
  * cámara lógica y solo se puede usar pidiendo una salida enlazada a su id, como
- * hace PhotonCamera. Es la vía para el ultra gran angular en equipos donde
- * CameraX solo ve la cámara lógica.
+ * hace PhotonCamera. Sirve tanto para el ultra gran angular como para los teles
+ * en equipos donde CameraX solo ve la cámara lógica.
  */
 data class HiddenLens(
     /** Cámara lógica que se abre. */
@@ -35,8 +35,8 @@ object HiddenLenses {
     private const val TAG = "HiddenLenses"
 
     /**
-     * Lentes físicas traseras más angulares que la principal que no aparecen en
-     * [exposedIds] (las que CameraX ya ofrece y se abren por su cuenta).
+     * Lentes físicas traseras que no aparecen en [exposedIds] (las que CameraX
+     * ya ofrece y se abren por su cuenta): ultra gran angular y teles ocultos.
      */
     fun back(context: Context, exposedIds: Set<String>): List<HiddenLens> {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
@@ -78,8 +78,9 @@ object HiddenLenses {
                     manager.getCameraCharacteristics(physicalId)
                 }.getOrNull() ?: continue
                 val equiv = equivalentMm(physical) ?: continue
-                // Solo interesan las más angulares que la principal.
-                if (equiv > reference * 0.85f) continue
+                // Se descarta solo la lente que coincide con la principal; los
+                // teles ocultos también interesan.
+                if (abs(equiv - reference) < reference * 0.05f) continue
                 val ratio = (equiv / reference * 10f).roundToInt() / 10f
                 if (ratio <= 0.2f) continue
                 val label = if (abs(ratio - ratio.roundToInt()) < 0.05f) {

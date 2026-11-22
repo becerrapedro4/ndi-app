@@ -649,6 +649,11 @@ private class CameraUi(val appContext: Context) {
     var maxZoom by mutableFloatStateOf(1f)
     var exposure by mutableIntStateOf(0)
     var exposureRange by mutableStateOf(0..0)
+    // Fps reales del sensor y nivel del micrófono para el medidor del visor.
+    var measuredFps by mutableFloatStateOf(0f)
+    var audioLevelLeft by mutableFloatStateOf(0f)
+    var audioLevelRight by mutableFloatStateOf(0f)
+    var audioGain by mutableFloatStateOf(1f)
     var version by mutableStateOf("")
 
     // Controles pro: arrancan cerrados para no tapar el visor.
@@ -950,6 +955,37 @@ private fun CameraUi.applyPro() {
     session.setWhiteBalance(wbMode)
 }
 
+/** Combinaciones de resolución y fps que recorre el chip de calidad. */
+private val cameraQualityPresets = listOf(
+    2160 to 30,
+    1080 to 60,
+    1080 to 50,
+    1080 to 30,
+    1080 to 25,
+    1080 to 24,
+    720 to 60,
+    720 to 30
+)
+
+/** Pasa a la siguiente combinación de resolución y fps. */
+private fun CameraUi.cycleQuality(lifecycleOwner: LifecycleOwner) {
+    val current = cameraQualityPresets.indexOfFirst { it.first == height && it.second == fps }
+    val next = cameraQualityPresets[(current + 1).mod(cameraQualityPresets.size)]
+    height = next.first
+    fps = next.second
+    restart(lifecycleOwner)
+}
+
+/** Ganancia del micrófono: 1×, 2×, 4× y 8×. */
+private val audioGainSteps = listOf(1f, 2f, 4f, 8f)
+
+private fun CameraUi.cycleAudioGain() {
+    val index = audioGainSteps.indexOfFirst { abs(it - audioGain) < 0.01f }
+    val next = audioGainSteps[(index + 1).mod(audioGainSteps.size)]
+    audioGain = next
+    session.setAudioGain(next)
+}
+
 private fun CameraUi.cameraRequest(): CameraRequest = CameraRequest(
     lensFacing = facing,
     cameraId = if (facing == CameraSelector.LENS_FACING_BACK) {
@@ -990,6 +1026,10 @@ private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
     // El micrófono alimenta NDI y la salida SRT a la vez.
     session.onAudioFrame = { pcm, samples, channels, rate ->
         if (srtTxRunning) srtTx.sendAudio(pcm, samples, channels, rate)
+    }
+    session.onAudioLevel = { left, right ->
+        audioLevelLeft = left
+        audioLevelRight = right
     }
     session.start(previewView, lifecycleOwner, cameraRequest())
     previewing = true
@@ -1260,6 +1300,15 @@ private fun CameraScreen(
         if (granted) camera.openPreview(lifecycleOwner)
     }
 
+    // Fps reales del sensor: lo que anuncia NDI no siempre es lo que llega.
+    LaunchedEffect(camera.previewing) {
+        while (camera.previewing) {
+            camera.measuredFps = camera.session.measuredFps
+            delay(700)
+        }
+        camera.measuredFps = 0f
+    }
+
     // Tally: la fuente está en uso si otro equipo se conecta a ella.
     LaunchedEffect(camera.running) {
         while (camera.running) {
@@ -1496,6 +1545,23 @@ private fun CameraScreen(
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
                 }
+                // Nivel del micrófono y ganancia de entrada, sobre el dock.
+                if (camera.withAudio && !camera.muted && camera.previewing) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    ) {
+                        LevelMeter(
+                            left = camera.audioLevelLeft,
+                            right = camera.audioLevelRight,
+                            modifier = Modifier.height(18.dp)
+                        )
+                        GlassChip("×${camera.audioGain.roundToInt()}", false) {
+                            camera.cycleAudioGain()
+                        }
+                    }
+                }
                 if (camera.zoomShown) {
                     ZoomBar(
                         camera = camera,
@@ -1518,7 +1584,12 @@ private fun CameraScreen(
                 grid = camera.grid,
                 audio = camera.withAudio && !camera.muted,
                 frontLens = camera.facing == CameraSelector.LENS_FACING_FRONT,
-                quality = "${camera.height}p${camera.fps}",
+                quality = buildString {
+                    append("${camera.height}p${camera.fps}")
+                    if (camera.measuredFps >= 1f) {
+                        append(" · ").append(camera.measuredFps.roundToInt()).append("fps")
+                    }
+                },
                 frameLabel = if (camera.fullSensor) "4:3" else "16:9",
                 zoomShown = camera.zoomShown,
                 lensLabel = camera.lenses.getOrNull(camera.lensIndex)?.label.orEmpty(),
@@ -1561,17 +1632,7 @@ private fun CameraScreen(
                 },
                 onFrame = { camera.setFrame(!camera.fullSensor, lifecycleOwner) },
                 onZoom = { camera.zoomShown = !camera.zoomShown },
-                onQuality = {
-                    val next = when {
-                        camera.height == 1080 && camera.fps == 30 -> 1080 to 60
-                        camera.height == 1080 && camera.fps == 60 -> 720 to 30
-                        camera.height == 720 && camera.fps == 30 -> 720 to 60
-                        else -> 1080 to 30
-                    }
-                    camera.height = next.first
-                    camera.fps = next.second
-                    camera.restart(lifecycleOwner)
-                },
+                onQuality = { camera.cycleQuality(lifecycleOwner) },
                 // Solo oculta la interfaz: la emisión sigue activa.
                 onHide = { chrome = false },
                 showSrt = camera.srtTxUrl.isNotBlank(),
