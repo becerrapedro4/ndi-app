@@ -199,11 +199,33 @@ class MainActivity : ComponentActivity() {
 
     /** NDI usa mDNS/multicast para descubrir fuentes: sin este lock el descubrimiento falla. */
     private fun enableMulticast() {
+        MulticastLock.ensure(applicationContext)
+    }
+}
+
+/**
+ * Lock de multicast de Android. Sin él el sistema filtra el multicast entrante y
+ * el anuncio mDNS de la fuente NDI deja de llegar a los receptores (vMix), aunque
+ * el monitor de la propia app la siga viendo por bucle local.
+ *
+ * Se guarda en un objeto: si el lock vive en una variable local, el recolector lo
+ * libera al primer GC —por ejemplo cuando el codificador de SRT empieza a pedir
+ * memoria— y el envío NDI desaparece de la red sin ningún aviso.
+ */
+private object MulticastLock {
+
+    private var lock: WifiManager.MulticastLock? = null
+
+    /** Pide el lock una sola vez y lo conserva mientras viva la app. */
+    fun ensure(context: Context) {
+        if (lock?.isHeld == true) return
         runCatching {
-            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val lock = wifi.createMulticastLock("ndi-app")
-            lock.setReferenceCounted(true)
-            lock.acquire()
+            val wifi = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+            lock = wifi.createMulticastLock("ndi-app").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
         }
     }
 }
@@ -418,7 +440,7 @@ private fun enterPip(activity: Activity?, aspect: Float = 16f / 9f) {
 private var lastCrashText: String? = null
 
 /** Estado compartido entre el visor y la pantalla de ajustes. */
-private class CameraUi(appContext: Context) {
+private class CameraUi(val appContext: Context) {
     val session = CameraSession(appContext)
     val previewView = PreviewView(appContext).apply {
         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -802,6 +824,9 @@ private fun CameraUi.cameraRequest(): CameraRequest = CameraRequest(
 /** Deja la cámara encendida en el visor aunque no se esté emitiendo. */
 private fun CameraUi.openPreview(lifecycleOwner: LifecycleOwner) {
     if (previewing) return
+    // Si el lock se perdió (Wi-Fi reiniciado o un GC), se vuelve a pedir antes
+    // de abrir la cámara: sin él la fuente NDI no se anuncia en la red.
+    MulticastLock.ensure(appContext)
     session.onStatus = { status = it }
     session.onRecordingStarted = {
         recording = true
