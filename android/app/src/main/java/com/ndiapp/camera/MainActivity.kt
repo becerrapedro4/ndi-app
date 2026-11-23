@@ -4136,6 +4136,16 @@ private fun MixerTab(
     var ndiGain by remember { mutableFloatStateOf(1f) }
     var micOpen by remember { mutableStateOf(true) }
     var ndiOpen by remember { mutableStateOf(true) }
+    var layerMode by remember { mutableIntStateOf(GlCompositor.LAYER_MIX) }
+    var pipScale by remember { mutableFloatStateOf(0.34f) }
+    var overlayScale by remember { mutableFloatStateOf(1f) }
+    var layerAnchor by remember { mutableIntStateOf(GlCompositor.ANCHOR_BOTTOM_RIGHT) }
+    var layerOpacity by remember { mutableFloatStateOf(1f) }
+    var layerBorder by remember { mutableStateOf(true) }
+
+    val layerScale =
+        if (layerMode == GlCompositor.LAYER_OVERLAY) overlayScale else pipScale
+    val transitionEnabled = running && layerMode == GlCompositor.LAYER_MIX
 
     val outputHeight = if (camera.height >= 1080) 1080 else 720
     val outputWidth = outputHeight * 16 / 9
@@ -4188,6 +4198,18 @@ private fun MixerTab(
         cameraLive = false
         ndiLive = false
         audioLevels = AudioMixer.Levels()
+    }
+
+    // Las capas se aplican al compositor al cambiar y al arrancar la mezcla.
+    LaunchedEffect(
+        running, layerMode, layerScale, layerAnchor, layerOpacity, layerBorder
+    ) {
+        if (!running) return@LaunchedEffect
+        engine.setLayerMode(layerMode)
+        engine.setLayerScale(layerScale)
+        engine.setLayerAnchor(layerAnchor)
+        engine.setLayerOpacity(layerOpacity)
+        engine.setLayerBorder(layerBorder)
     }
 
     LaunchedEffect(Unit) {
@@ -4249,6 +4271,16 @@ private fun MixerTab(
                     "No se pudo arrancar la mezcla"
                 }
             }
+        }
+    }
+
+    // Con capas la base es A: el cruce vuelve a A para no quedar en B a medias.
+    val selectLayerMode: (Int) -> Unit = { mode ->
+        layerMode = mode
+        if (mode != GlCompositor.LAYER_MIX) {
+            engine.cutTo(GlCompositor.INPUT_A)
+            program = GlCompositor.INPUT_A
+            preview = GlCompositor.INPUT_A
         }
     }
 
@@ -4396,20 +4428,20 @@ private fun MixerTab(
                     "A",
                     active = preview == GlCompositor.INPUT_A,
                     accent = NdiGlass.Blue,
-                    enabled = running
+                    enabled = transitionEnabled
                 ) { preview = GlCompositor.INPUT_A }
                 MixerButton(
                     "B",
                     active = preview == GlCompositor.INPUT_B,
                     accent = NdiGlass.Blue,
-                    enabled = running
+                    enabled = transitionEnabled
                 ) { preview = GlCompositor.INPUT_B }
                 Spacer(Modifier.width(4.dp))
-                MixerButton("CUT", accent = Color(0xFFFF3B30), enabled = running) {
+                MixerButton("CUT", accent = Color(0xFFFF3B30), enabled = transitionEnabled) {
                     engine.cutTo(preview)
                     program = preview
                 }
-                MixerButton("FADE", accent = Color(0xFF8CCBFF), enabled = running) {
+                MixerButton("FADE", accent = Color(0xFF8CCBFF), enabled = transitionEnabled) {
                     engine.fadeTo(preview, fadeMs)
                     program = preview
                 }
@@ -4428,18 +4460,136 @@ private fun MixerTab(
                         "${value} ms",
                         active = fadeMs == value,
                         accent = NdiGlass.Blue,
-                        enabled = running
+                        enabled = transitionEnabled
                     ) { fadeMs = value }
                 }
             }
             Text(
-                if (mix <= 0.01f) "En el aire: A"
-                else if (mix >= 0.99f) "En el aire: B"
-                else "Mezclando: ${(100 - mix * 100).roundToInt()}% A · " +
-                    "${(mix * 100).roundToInt()}% B",
+                when {
+                    layerMode == GlCompositor.LAYER_PIP ->
+                        "Capa B en PiP · ${layerAnchorLabel(layerAnchor)}"
+                    layerMode == GlCompositor.LAYER_OVERLAY ->
+                        "Capa B superpuesta · ${(layerOpacity * 100).roundToInt()} %"
+                    mix <= 0.01f -> "En el aire: A"
+                    mix >= 0.99f -> "En el aire: B"
+                    else -> "Mezclando: ${(100 - mix * 100).roundToInt()}% A · " +
+                        "${(mix * 100).roundToInt()}% B"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = NdiGlass.Muted
             )
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            Text(
+                "Capas · B sobre A",
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            Text(
+                when (layerMode) {
+                    GlCompositor.LAYER_PIP ->
+                        "B en un recuadro sobre la cámara, con tamaño, esquina y marco."
+                    GlCompositor.LAYER_OVERLAY ->
+                        "B translúcida sobre la cámara, con tamaño y opacidad."
+                    else -> "Pasá a PiP u overlay para componer B encima de A."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = NdiGlass.Muted
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MixerButton(
+                    "MIX",
+                    active = layerMode == GlCompositor.LAYER_MIX,
+                    enabled = running
+                ) { selectLayerMode(GlCompositor.LAYER_MIX) }
+                MixerButton(
+                    "PiP",
+                    active = layerMode == GlCompositor.LAYER_PIP,
+                    enabled = running
+                ) { selectLayerMode(GlCompositor.LAYER_PIP) }
+                MixerButton(
+                    "OVERLAY",
+                    active = layerMode == GlCompositor.LAYER_OVERLAY,
+                    enabled = running
+                ) { selectLayerMode(GlCompositor.LAYER_OVERLAY) }
+            }
+            if (layerMode != GlCompositor.LAYER_MIX) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Tamaño",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Muted
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "${(layerScale * 100).roundToInt()} % del ancho",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Text
+                    )
+                }
+                Slider(
+                    value = layerScale,
+                    onValueChange = { value ->
+                        if (layerMode == GlCompositor.LAYER_OVERLAY) overlayScale = value
+                        else pipScale = value
+                    },
+                    valueRange = if (layerMode == GlCompositor.LAYER_OVERLAY) 0.5f..1.1f
+                    else 0.15f..0.6f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = NdiGlass.BlueBright,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                    )
+                )
+                if (layerMode == GlCompositor.LAYER_PIP) {
+                    Text(
+                        "Posición",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Muted
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        mixerAnchors.forEach { (label, anchor) ->
+                            MixerButton(
+                                label,
+                                active = layerAnchor == anchor,
+                                accent = NdiGlass.Blue,
+                                enabled = running
+                            ) { layerAnchor = anchor }
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Opacidad",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Muted
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "${(layerOpacity * 100).roundToInt()} %",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Text
+                    )
+                }
+                Slider(
+                    value = layerOpacity,
+                    onValueChange = { value -> layerOpacity = value },
+                    valueRange = 0.2f..1f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = NdiGlass.BlueBright,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                    )
+                )
+                if (layerMode == GlCompositor.LAYER_PIP) {
+                    MixerButton(
+                        if (layerBorder) "Marco · sí" else "Marco · no",
+                        active = layerBorder,
+                        enabled = running
+                    ) { layerBorder = !layerBorder }
+                }
+            }
 
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
@@ -4520,13 +4670,30 @@ private fun MixerTab(
                 }
             ) { if (!starting) toggleMix() }
             Text(
-                "Las capas PiP y los overlays llegan en el próximo paso.",
+                "El próximo paso es la API HTTP, los keyers y la grabación del programa.",
                 style = MaterialTheme.typography.labelSmall,
                 color = NdiGlass.Muted.copy(alpha = 0.8f)
             )
             Spacer(Modifier.height(20.dp))
         }
     }
+}
+
+/** Esquinas y centro donde se puede anclar la capa B. */
+private val mixerAnchors = listOf(
+    "↖" to GlCompositor.ANCHOR_TOP_LEFT,
+    "↗" to GlCompositor.ANCHOR_TOP_RIGHT,
+    "↙" to GlCompositor.ANCHOR_BOTTOM_LEFT,
+    "↘" to GlCompositor.ANCHOR_BOTTOM_RIGHT,
+    "Centro" to GlCompositor.ANCHOR_CENTER,
+)
+
+private fun layerAnchorLabel(anchor: Int): String = when (anchor) {
+    GlCompositor.ANCHOR_TOP_LEFT -> "arriba izquierda"
+    GlCompositor.ANCHOR_TOP_RIGHT -> "arriba derecha"
+    GlCompositor.ANCHOR_BOTTOM_LEFT -> "abajo izquierda"
+    GlCompositor.ANCHOR_BOTTOM_RIGHT -> "abajo derecha"
+    else -> "centro"
 }
 
 /** Ganancia de audio por pasos: 50 %, 100 %, 150 % y 200 %. */

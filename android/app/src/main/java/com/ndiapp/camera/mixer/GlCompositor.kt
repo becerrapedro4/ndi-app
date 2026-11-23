@@ -25,6 +25,10 @@ import java.util.concurrent.locks.LockSupport
  *
  * El reloj es del compositor, no de las fuentes: si una entrada se congela, la
  * otra sigue saliendo y NDI no se queda sin cuadros.
+ *
+ * Además del cruce, B puede ir como capa sobre A: en [LAYER_PIP] en un recuadro
+ * con tamaño, esquina, opacidad y marco; en [LAYER_OVERLAY] a tamaño ajustable y
+ * translúcida sobre el cuadro completo.
  */
 class GlCompositor {
 
@@ -37,9 +41,14 @@ class GlCompositor {
         private const val VERTEX_SHADER = """
             attribute vec2 aPos;
             uniform vec2 uScale;
+            uniform vec2 uOffset;
             varying vec2 vUV;
             void main() {
-                gl_Position = vec4(aPos.x * uScale.x, aPos.y * uScale.y, 0.0, 1.0);
+                gl_Position = vec4(
+                    aPos.x * uScale.x + uOffset.x,
+                    aPos.y * uScale.y + uOffset.y,
+                    0.0, 1.0
+                );
                 vUV = vec2(aPos.x * 0.5 + 0.5, aPos.y * 0.5 + 0.5);
             }
         """
@@ -48,16 +57,60 @@ class GlCompositor {
             precision mediump float;
             uniform sampler2D uTex;
             uniform float uAlpha;
+            uniform vec3 uTint;
             varying vec2 vUV;
             void main() {
                 vec4 color = texture2D(uTex, vUV);
-                gl_FragColor = vec4(color.rgb, color.a * uAlpha);
+                gl_FragColor = vec4(color.rgb * uTint, color.a * uAlpha);
             }
         """
+
+        /** Capas del programa: cruce a pantalla completa, PiP u overlay. */
+        const val LAYER_MIX = 0
+        const val LAYER_PIP = 1
+        const val LAYER_OVERLAY = 2
+
+        /** Esquina o centro donde se ancla la capa B. */
+        const val ANCHOR_TOP_LEFT = 0
+        const val ANCHOR_TOP_RIGHT = 1
+        const val ANCHOR_BOTTOM_LEFT = 2
+        const val ANCHOR_BOTTOM_RIGHT = 3
+        const val ANCHOR_CENTER = 4
+
+        /** Separación de la capa con el borde del cuadro, en NDC. */
+        private const val LAYER_MARGIN = 0.06f
+
+        /** Grosor del marco de la capa, en NDC (≈ 3 px a 1080p). */
+        private const val LAYER_BORDER = 0.0035f
     }
 
     /** Cuadro compuesto listo para enviar. El búfer se reutiliza entre cuadros. */
     var onFrame: ((rgba: ByteArray, width: Int, height: Int) -> Unit)? = null
+
+    /** Capa de B sobre A: [LAYER_MIX], [LAYER_PIP] o [LAYER_OVERLAY]. */
+    @Volatile
+    var layerMode: Int = LAYER_MIX
+        private set
+
+    /** Tamaño de la capa B: fracción del ancho de salida (1 = cuadro completo). */
+    @Volatile
+    var layerScale: Float = 0.34f
+        private set
+
+    /** Ancla de la capa B: una de las constantes ANCHOR_*. */
+    @Volatile
+    var layerAnchor: Int = ANCHOR_BOTTOM_RIGHT
+        private set
+
+    /** Opacidad de la capa B sobre el fondo (0 = invisible, 1 = opaca). */
+    @Volatile
+    var layerOpacity: Float = 1f
+        private set
+
+    /** Dibuja un marco alrededor de la capa PiP. */
+    @Volatile
+    var layerBorder: Boolean = true
+        private set
 
     /** Mezcla actual (0 = A, 1 = B). La lee la interfaz para el fader. */
     @Volatile
@@ -81,6 +134,9 @@ class GlCompositor {
 
     @Volatile
     private var targetFps = 30
+
+    /** Opacidad suavizada de la capa: aparece y desaparece sin saltos. */
+    private var layerAlpha = 0f
 
     private val fadeLock = Any()
     private var mixTarget = 0f
@@ -109,8 +165,11 @@ class GlCompositor {
     private var program = 0
     private var aPos = 0
     private var uScale = 0
+    private var uOffset = 0
     private var uAlpha = 0
+    private var uTint = 0
     private var uTex = 0
+    private var whiteTexture = 0
     private val textures = IntArray(2) { 0 }
     private val textureWidth = IntArray(2)
     private val textureHeight = IntArray(2)
@@ -187,6 +246,30 @@ class GlCompositor {
         }
     }
 
+    /** Elige cómo se compone B sobre A. */
+    fun setLayerMode(mode: Int) {
+        layerMode = mode.coerceIn(LAYER_MIX, LAYER_OVERLAY)
+    }
+
+    /** Tamaño de la capa B como fracción del ancho de salida. */
+    fun setLayerScale(scale: Float) {
+        layerScale = scale.coerceIn(0.1f, 1.4f)
+    }
+
+    /** Esquina (o centro) donde se ancla la capa B. */
+    fun setLayerAnchor(anchor: Int) {
+        layerAnchor = anchor.coerceIn(ANCHOR_TOP_LEFT, ANCHOR_CENTER)
+    }
+
+    /** Opacidad de la capa B sobre el fondo. */
+    fun setLayerOpacity(opacity: Float) {
+        layerOpacity = opacity.coerceIn(0f, 1f)
+    }
+
+    fun setLayerBorder(visible: Boolean) {
+        layerBorder = visible
+    }
+
     fun stop() {
         if (!running && thread == null) return
         running = false
@@ -196,6 +279,7 @@ class GlCompositor {
         }
         thread = null
         mix = 0f
+        layerAlpha = 0f
         synchronized(fadeLock) {
             mixTarget = 0f
             fadeFrom = 0f
@@ -237,6 +321,7 @@ class GlCompositor {
         updateMix(now)
         upload(INPUT_A)
         upload(INPUT_B)
+        updateLayerAlpha()
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer)
         GLES20.glViewport(0, 0, outWidth, outHeight)
@@ -250,11 +335,23 @@ class GlCompositor {
         GLES20.glEnableVertexAttribArray(aPos)
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad)
 
-        // A opaco y B encima con alfa = mezcla: el crossfade es una sola pasada.
+        // A ocupa el cuadro; en MIX se cruza con B a pantalla completa y en las
+        // capas B se dibuja encima con su tamaño, posición y opacidad.
         drawSlot(INPUT_A, 1f)
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        drawSlot(INPUT_B, mix)
+        val mode = layerMode
+        if (mode == LAYER_MIX) {
+            drawSlot(INPUT_B, mix)
+        } else if (layerAlpha > 0.004f) {
+            drawLayer(
+                INPUT_B,
+                layerScale,
+                if (mode == LAYER_OVERLAY) ANCHOR_CENTER else layerAnchor,
+                layerAlpha,
+                mode == LAYER_PIP && layerBorder
+            )
+        }
         GLES20.glDisable(GLES20.GL_BLEND)
 
         GLES20.glFinish()
@@ -266,6 +363,14 @@ class GlCompositor {
         readBuffer.position(0)
         readBuffer.get(outBytes, 0, outBytes.size)
         onFrame?.invoke(outBytes, outWidth, outHeight)
+    }
+
+    /** Acerca la opacidad de la capa a su objetivo: 0 en MIX, su valor en capas. */
+    private fun updateLayerAlpha() {
+        val target = if (layerMode == LAYER_MIX) 0f else layerOpacity
+        val delta = target - layerAlpha
+        layerAlpha += if (delta > -0.01f && delta < 0.01f) delta else delta * 0.22f
+        if (layerAlpha < 0.004f) layerAlpha = 0f
     }
 
     private fun updateMix(now: Long) {
@@ -347,9 +452,13 @@ class GlCompositor {
         uploadedSeq[slot] = seq
     }
 
+    /** Dibuja la entrada a cuadro completo, encajada sin deformarse. */
     private fun drawSlot(slot: Int, alpha: Float) {
-        if (textures[slot] == 0 || textureWidth[slot] <= 0) return
-        val inputAspect = textureWidth[slot].toFloat() / textureHeight[slot].toFloat()
+        val texture = textures[slot]
+        val texWidth = textureWidth[slot]
+        val texHeight = textureHeight[slot]
+        if (texture == 0 || texWidth <= 0 || texHeight <= 0) return
+        val inputAspect = texWidth.toFloat() / texHeight.toFloat()
         val outputAspect = outWidth.toFloat() / outHeight.toFloat()
         var scaleX = 1f
         var scaleY = 1f
@@ -358,10 +467,82 @@ class GlCompositor {
         } else {
             scaleX = inputAspect / outputAspect
         }
-        GLES20.glUniform2f(uScale, scaleX, scaleY)
-        GLES20.glUniform1f(uAlpha, alpha.coerceIn(0f, 1f))
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[slot])
+        setupQuad(scaleX, scaleY, 0f, 0f, alpha)
+        setTint(1f, 1f, 1f)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+    }
+
+    /**
+     * Dibuja la entrada [slot] como capa sobre el fondo.
+     *
+     * La caja ocupa [scale] del ancho de salida con la relación de aspecto de la
+     * salida; la imagen se encaja dentro sin deformarse. [anchor] elige la esquina
+     * (o el centro) y el margen fijo la separa del borde. Si [border] está activo se
+     * pinta antes un marco claro del tamaño de la imagen.
+     */
+    private fun drawLayer(
+        slot: Int,
+        scale: Float,
+        anchor: Int,
+        alpha: Float,
+        border: Boolean
+    ) {
+        val texture = textures[slot]
+        val texWidth = textureWidth[slot]
+        val texHeight = textureHeight[slot]
+        if (texture == 0 || texWidth <= 0 || texHeight <= 0) return
+
+        val boxWidth = (scale * outWidth).coerceAtMost(outWidth * 1.4f)
+        val boxHeight = boxWidth * outHeight / outWidth
+        val inputAspect = texWidth.toFloat() / texHeight.toFloat()
+        val boxAspect = boxWidth / boxHeight
+        var drawWidth = boxWidth
+        var drawHeight = boxWidth / inputAspect
+        if (inputAspect < boxAspect) {
+            drawHeight = boxHeight
+            drawWidth = boxHeight * inputAspect
+        }
+        // La escala es media anchura en NDC: 1 coincide con el cuadro completo.
+        val halfX = drawWidth / outWidth
+        val halfY = drawHeight / outHeight
+        val centerX = when (anchor) {
+            ANCHOR_TOP_LEFT, ANCHOR_BOTTOM_LEFT -> -1f + LAYER_MARGIN + halfX
+            ANCHOR_TOP_RIGHT, ANCHOR_BOTTOM_RIGHT -> 1f - LAYER_MARGIN - halfX
+            else -> 0f
+        }
+        val centerY = when (anchor) {
+            ANCHOR_TOP_LEFT, ANCHOR_TOP_RIGHT -> 1f - LAYER_MARGIN - halfY
+            ANCHOR_BOTTOM_LEFT, ANCHOR_BOTTOM_RIGHT -> -1f + LAYER_MARGIN + halfY
+            else -> 0f
+        }
+
+        if (border) {
+            drawSolid(centerX, centerY, halfX + LAYER_BORDER, halfY + LAYER_BORDER)
+        }
+        setupQuad(halfX, halfY, centerX, centerY, alpha)
+        setTint(1f, 1f, 1f)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+    }
+
+    /** Rectángulo de color plano, usado para el marco de la capa. */
+    private fun drawSolid(centerX: Float, centerY: Float, halfX: Float, halfY: Float) {
+        if (whiteTexture == 0) return
+        setupQuad(halfX, halfY, centerX, centerY, 1f)
+        setTint(0.55f, 0.78f, 1f)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, whiteTexture)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+    }
+
+    private fun setupQuad(halfX: Float, halfY: Float, centerX: Float, centerY: Float, alpha: Float) {
+        GLES20.glUniform2f(uScale, halfX, halfY)
+        GLES20.glUniform2f(uOffset, centerX, centerY)
+        GLES20.glUniform1f(uAlpha, alpha.coerceIn(0f, 1f))
+    }
+
+    private fun setTint(red: Float, green: Float, blue: Float) {
+        GLES20.glUniform3f(uTint, red, green, blue)
     }
 
     // ------------------------------------------------------------------ EGL --
@@ -431,8 +612,29 @@ class GlCompositor {
         }
         aPos = GLES20.glGetAttribLocation(program, "aPos")
         uScale = GLES20.glGetUniformLocation(program, "uScale")
+        uOffset = GLES20.glGetUniformLocation(program, "uOffset")
         uAlpha = GLES20.glGetUniformLocation(program, "uAlpha")
+        uTint = GLES20.glGetUniformLocation(program, "uTint")
         uTex = GLES20.glGetUniformLocation(program, "uTex")
+
+        // Textura blanca de 1×1 para el marco de la capa: el color lo pone uTint.
+        val white = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        white.put(byteArrayOf(255.toByte(), 255.toByte(), 255.toByte(), 255.toByte()))
+        white.position(0)
+        val whiteIds = IntArray(1)
+        GLES20.glGenTextures(1, whiteIds, 0)
+        whiteTexture = whiteIds[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, whiteTexture)
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST
+        )
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST
+        )
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 1, 1, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, white
+        )
 
         quad = ByteBuffer
             .allocateDirect(4 * 2 * 4)
@@ -514,6 +716,10 @@ class GlCompositor {
         if (framebufferTexture != 0) {
             GLES20.glDeleteTextures(1, intArrayOf(framebufferTexture), 0)
             framebufferTexture = 0
+        }
+        if (whiteTexture != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(whiteTexture), 0)
+            whiteTexture = 0
         }
         val eglDisplay = display
         val eglSurface = surface

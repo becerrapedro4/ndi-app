@@ -70,6 +70,42 @@ class MixerEngine(private val context: Context) {
     val micInput: String
         get() = microphone?.inputLabel.orEmpty()
 
+    /** Capa de B sobre A en el programa: MIX, PiP u OVERLAY. */
+    val layerMode: Int
+        get() = compositor?.layerMode ?: GlCompositor.LAYER_MIX
+
+    val layerScale: Float
+        get() = compositor?.layerScale ?: 0.34f
+
+    val layerAnchor: Int
+        get() = compositor?.layerAnchor ?: GlCompositor.ANCHOR_BOTTOM_RIGHT
+
+    val layerOpacity: Float
+        get() = compositor?.layerOpacity ?: 1f
+
+    val layerBorder: Boolean
+        get() = compositor?.layerBorder ?: true
+
+    fun setLayerMode(mode: Int) {
+        compositor?.setLayerMode(mode)
+    }
+
+    fun setLayerScale(scale: Float) {
+        compositor?.setLayerScale(scale)
+    }
+
+    fun setLayerAnchor(anchor: Int) {
+        compositor?.setLayerAnchor(anchor)
+    }
+
+    fun setLayerOpacity(opacity: Float) {
+        compositor?.setLayerOpacity(opacity)
+    }
+
+    fun setLayerBorder(visible: Boolean) {
+        compositor?.setLayerBorder(visible)
+    }
+
     /** Ganancia del canal A (micrófono) y del canal B (NDI). */
     var micGain: Float
         get() = audio.micGain
