@@ -5,8 +5,10 @@ import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
+import android.opengl.EGLExt
 import android.opengl.GLES20
 import android.util.Log
+import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -58,12 +60,47 @@ class GlCompositor {
             uniform sampler2D uTex;
             uniform float uAlpha;
             uniform vec3 uTint;
+            uniform int uKeyMode;
+            uniform vec3 uKeyColor;
+            uniform float uKeySimilarity;
+            uniform float uKeySoftness;
             varying vec2 vUV;
+
+            // Crominancia (Cb, Cr) del color: la clave se mide sólo ahí, así un
+            // verde apagado o con brillo distinto sigue cayendo dentro del key.
+            vec2 chroma(vec3 c) {
+                return vec2(
+                    -0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b,
+                    0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b
+                );
+            }
+
             void main() {
                 vec4 color = texture2D(uTex, vUV);
-                gl_FragColor = vec4(color.rgb * uTint, color.a * uAlpha);
+                float alpha = color.a * uAlpha;
+                if (uKeyMode > 0) {
+                    float distance;
+                    if (uKeyMode == 1) {
+                        distance = length(chroma(color.rgb) - chroma(uKeyColor));
+                    } else {
+                        float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+                        float keyLuma = dot(uKeyColor, vec3(0.299, 0.587, 0.114));
+                        distance = abs(luma - keyLuma);
+                    }
+                    alpha *= smoothstep(
+                        uKeySimilarity,
+                        uKeySimilarity + max(uKeySoftness, 0.001),
+                        distance
+                    );
+                }
+                gl_FragColor = vec4(color.rgb * uTint, alpha);
             }
         """
+
+        /** Keyer apagado, croma o luma. */
+        const val KEY_OFF = 0
+        const val KEY_CHROMA = 1
+        const val KEY_LUMA = 2
 
         /** Capas del programa: cruce a pantalla completa, PiP u overlay. */
         const val LAYER_MIX = 0
@@ -111,6 +148,34 @@ class GlCompositor {
     @Volatile
     var layerBorder: Boolean = true
         private set
+
+    /** Keyer aplicado a la entrada B: [KEY_OFF], [KEY_CHROMA] o [KEY_LUMA]. */
+    @Volatile
+    var keyMode: Int = KEY_OFF
+        private set
+
+    /** Color de referencia del keyer (0..1 por canal). */
+    @Volatile
+    private var keyRed = 0f
+
+    @Volatile
+    private var keyGreen = 1f
+
+    @Volatile
+    private var keyBlue = 0f
+
+    @Volatile
+    private var keySimilarity = 0.18f
+
+    @Volatile
+    private var keySoftness = 0.12f
+
+    /** Tamaño del programa, para quien lo graba. */
+    val outputWidth: Int
+        get() = outWidth
+
+    val outputHeight: Int
+        get() = outHeight
 
     /** Mezcla actual (0 = A, 1 = B). La lee la interfaz para el fader. */
     @Volatile
@@ -162,6 +227,15 @@ class GlCompositor {
     private var display: EGLDisplay? = null
     private var context: EGLContext? = null
     private var surface: EGLSurface? = null
+    private var eglConfig: EGLConfig? = null
+
+    /** Salida adicional hacia el codificador de grabación, si está grabando. */
+    private var recorderSurface: EGLSurface? = null
+    private var recorderStartNs = 0L
+
+    /** Tareas que hay que ejecutar en el hilo GL (crear o cerrar la grabación). */
+    private val taskLock = Any()
+    private val tasks = ArrayList<() -> Unit>()
     private var program = 0
     private var aPos = 0
     private var uScale = 0
@@ -169,6 +243,10 @@ class GlCompositor {
     private var uAlpha = 0
     private var uTint = 0
     private var uTex = 0
+    private var uKeyMode = 0
+    private var uKeyColor = 0
+    private var uKeySimilarity = 0
+    private var uKeySoftness = 0
     private var whiteTexture = 0
     private val textures = IntArray(2) { 0 }
     private val textureWidth = IntArray(2)
@@ -270,6 +348,101 @@ class GlCompositor {
         layerBorder = visible
     }
 
+    /**
+     * Keyer sobre la entrada B: [KEY_CHROMA] descarta el color de referencia
+     * (pantalla verde o azul) y [KEY_LUMA] descarta por brillo. Sólo afecta a B,
+     * tanto en el cruce como en las capas; A siempre sale entera.
+     */
+    fun setKey(mode: Int, red: Float, green: Float, blue: Float, similarity: Float, softness: Float) {
+        keyMode = mode.coerceIn(KEY_OFF, KEY_LUMA)
+        keyRed = red.coerceIn(0f, 1f)
+        keyGreen = green.coerceIn(0f, 1f)
+        keyBlue = blue.coerceIn(0f, 1f)
+        keySimilarity = similarity.coerceIn(0.01f, 1f)
+        keySoftness = softness.coerceIn(0.001f, 1f)
+    }
+
+    /**
+     * Conecta la superficie del codificador de grabación. A partir de ahí cada
+     * cuadro del programa se dibuja también ahí, sin pasar por el procesador.
+     */
+    fun attachRecorder(target: Surface): Boolean {
+        if (!running) return false
+        var attached = false
+        val done = runOnGl {
+            val eglDisplay = display ?: return@runOnGl
+            val config = eglConfig ?: return@runOnGl
+            detachRecorderLocked()
+            val created = EGL14.eglCreateWindowSurface(
+                eglDisplay, config, target, intArrayOf(EGL14.EGL_NONE), 0
+            )
+            if (created == null || created == EGL14.EGL_NO_SURFACE) {
+                Log.w(TAG, "No se pudo crear la superficie de grabación")
+                return@runOnGl
+            }
+            recorderSurface = created
+            recorderStartNs = System.nanoTime()
+            attached = true
+        }
+        if (!done || !attached) {
+            runOnGl { detachRecorderLocked() }
+            return false
+        }
+        return true
+    }
+
+    /** Desconecta la grabación y devuelve la superficie de lectura. */
+    fun detachRecorder() {
+        if (!running) {
+            recorderSurface = null
+            return
+        }
+        runOnGl { detachRecorderLocked() }
+    }
+
+    private fun detachRecorderLocked() {
+        val eglDisplay = display ?: return
+        val target = recorderSurface ?: return
+        recorderSurface = null
+        runCatching {
+            EGL14.eglMakeCurrent(eglDisplay, surface, surface, context)
+            EGL14.eglDestroySurface(eglDisplay, target)
+        }
+    }
+
+    /** Pide al hilo GL que ejecute [block] y espera un momento a que termine. */
+    private fun runOnGl(block: () -> Unit): Boolean {
+        if (!running) return false
+        val latch = CountDownLatch(1)
+        synchronized(taskLock) {
+            tasks.add {
+                runCatching(block)
+                latch.countDown()
+            }
+        }
+        return runCatching { latch.await(1500, TimeUnit.MILLISECONDS) }.getOrDefault(false)
+    }
+
+    private fun drainTasks() {
+        val pending: List<() -> Unit> = synchronized(taskLock) {
+            if (tasks.isEmpty()) return
+            val copy = ArrayList(tasks)
+            tasks.clear()
+            copy
+        }
+        for (task in pending) {
+            runCatching { task() }
+        }
+    }
+
+    private fun setKeyUniforms(allow: Boolean) {
+        val active = allow && keyMode != KEY_OFF
+        GLES20.glUniform1i(uKeyMode, if (active) keyMode else KEY_OFF)
+        GLES20.glUniform3f(uKeyColor, keyRed, keyGreen, keyBlue)
+        GLES20.glUniform1f(uKeySimilarity, keySimilarity)
+        GLES20.glUniform1f(uKeySoftness, keySoftness)
+    }
+
     fun stop() {
         if (!running && thread == null) return
         running = false
@@ -302,6 +475,7 @@ class GlCompositor {
         var next = System.nanoTime()
         val tick = 1_000_000_000L / targetFps.coerceIn(1, 60)
         while (running) {
+            drainTasks()
             val now = System.nanoTime()
             if (now < next) {
                 LockSupport.parkNanos(next - now)
@@ -337,12 +511,15 @@ class GlCompositor {
 
         // A ocupa el cuadro; en MIX se cruza con B a pantalla completa y en las
         // capas B se dibuja encima con su tamaño, posición y opacidad.
+        setKeyUniforms(false)
         drawSlot(INPUT_A, 1f)
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         val mode = layerMode
         if (mode == LAYER_MIX) {
+            setKeyUniforms(true)
             drawSlot(INPUT_B, mix)
+            setKeyUniforms(false)
         } else if (layerAlpha > 0.004f) {
             drawLayer(
                 INPUT_B,
@@ -363,6 +540,37 @@ class GlCompositor {
         readBuffer.position(0)
         readBuffer.get(outBytes, 0, outBytes.size)
         onFrame?.invoke(outBytes, outWidth, outHeight)
+
+        // Segundo destino: el codificador de grabación recibe el mismo cuadro.
+        val recorder = recorderSurface
+        if (recorder != null) drawProgramToRecorder(recorder, now)
+    }
+
+    /** Dibuja el programa ya compuesto en la superficie de la grabación. */
+    private fun drawProgramToRecorder(recorder: EGLSurface, now: Long) {
+        val eglDisplay = display ?: return
+        val eglContext = context ?: return
+        if (!EGL14.eglMakeCurrent(eglDisplay, recorder, recorder, eglContext)) return
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, outWidth, outHeight)
+        GLES20.glDisable(GLES20.GL_BLEND)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glUniform1i(uTex, 0)
+        GLES20.glEnableVertexAttribArray(aPos)
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quad)
+        setKeyUniforms(false)
+        setupQuad(1f, 1f, 0f, 0f, 1f)
+        setTint(1f, 1f, 1f)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, framebufferTexture)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        // El reloj de la grabación arranca con la primera superficie: el vídeo
+        // empieza en 0 y coincide con el audio, que también empieza en 0.
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, recorder, now - recorderStartNs)
+        EGL14.eglSwapBuffers(eglDisplay, recorder)
+        runCatching { EGL14.eglMakeCurrent(eglDisplay, surface, surface, eglContext) }
     }
 
     /** Acerca la opacidad de la capa a su objetivo: 0 en MIX, su valor en capas. */
@@ -518,8 +726,10 @@ class GlCompositor {
         }
 
         if (border) {
+            setKeyUniforms(false)
             drawSolid(centerX, centerY, halfX + LAYER_BORDER, halfY + LAYER_BORDER)
         }
+        setKeyUniforms(true)
         setupQuad(halfX, halfY, centerX, centerY, alpha)
         setTint(1f, 1f, 1f)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
@@ -556,7 +766,8 @@ class GlCompositor {
 
         val configAttrs = intArrayOf(
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT or EGL14.EGL_WINDOW_BIT,
+            EGLExt.EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
@@ -571,6 +782,7 @@ class GlCompositor {
             return false
         }
         val config = configs[0] ?: return false
+        eglConfig = config
         val contextAttrs = intArrayOf(
             EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
             EGL14.EGL_NONE
@@ -616,6 +828,10 @@ class GlCompositor {
         uAlpha = GLES20.glGetUniformLocation(program, "uAlpha")
         uTint = GLES20.glGetUniformLocation(program, "uTint")
         uTex = GLES20.glGetUniformLocation(program, "uTex")
+        uKeyMode = GLES20.glGetUniformLocation(program, "uKeyMode")
+        uKeyColor = GLES20.glGetUniformLocation(program, "uKeyColor")
+        uKeySimilarity = GLES20.glGetUniformLocation(program, "uKeySimilarity")
+        uKeySoftness = GLES20.glGetUniformLocation(program, "uKeySoftness")
 
         // Textura blanca de 1×1 para el marco de la capa: el color lo pone uTint.
         val white = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
@@ -724,6 +940,11 @@ class GlCompositor {
         val eglDisplay = display
         val eglSurface = surface
         val eglContext = context
+        val recorder = recorderSurface
+        recorderSurface = null
+        if (eglDisplay != null && recorder != null) {
+            runCatching { EGL14.eglDestroySurface(eglDisplay, recorder) }
+        }
         if (eglDisplay != null) {
             EGL14.eglMakeCurrent(
                 eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE,
@@ -737,5 +958,6 @@ class GlCompositor {
         surface = null
         context = null
         display = null
+        eglConfig = null
     }
 }

@@ -8,6 +8,7 @@ import android.util.Log
 import com.ndiapp.camera.media.AudioCapture
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiSender
+import java.io.File
 import java.nio.ByteBuffer
 
 /**
@@ -57,6 +58,29 @@ class MixerEngine(private val context: Context) {
     private var previewBuffer: ByteBuffer? = null
     private var previewAt = 0L
 
+    /** Grabación del programa, con el vídeo compuesto y la mezcla de audio. */
+    private var recorder: ProgramRecorder? = null
+    private var lastRecording: File? = null
+
+    /** Estado del keyer, para aplicarlo al compositor cuando arranca. */
+    private var keyMode = GlCompositor.KEY_OFF
+    private var keyRed = 0f
+    private var keyGreen = 1f
+    private var keyBlue = 0f
+    private var keySimilarity = 0.18f
+    private var keySoftness = 0.12f
+
+    val recording: Boolean
+        get() = recorder != null
+
+    /** Segundos de la grabación en curso, para el contador. */
+    val recordingSeconds: Int
+        get() = recorder?.elapsedSeconds ?: 0
+
+    /** Último archivo grabado (o el que se está grabando). */
+    val recordingPath: String?
+        get() = (recorder?.file ?: lastRecording)?.absolutePath
+
     val mix: Float
         get() = compositor?.mix ?: 0f
 
@@ -104,6 +128,71 @@ class MixerEngine(private val context: Context) {
 
     fun setLayerBorder(visible: Boolean) {
         compositor?.setLayerBorder(visible)
+    }
+
+    /** Keyer sobre la entrada B; [mode] es KEY_OFF, KEY_CHROMA o KEY_LUMA. */
+    fun setKey(
+        mode: Int,
+        red: Float,
+        green: Float,
+        blue: Float,
+        similarity: Float,
+        softness: Float
+    ) {
+        keyMode = mode
+        keyRed = red
+        keyGreen = green
+        keyBlue = blue
+        keySimilarity = similarity
+        keySoftness = softness
+        compositor?.setKey(mode, red, green, blue, similarity, softness)
+    }
+
+    /**
+     * Empieza a grabar el programa en MP4. El compositor dibuja en la superficie
+     * del codificador y la mezcla de audio se copia a su pista AAC.
+     */
+    fun startRecording(): Boolean {
+        if (!running || recorder != null) return false
+        val gl = compositor ?: return false
+        val created = runCatching {
+            ProgramRecorder(
+                file = ProgramRecorder.newOutputFile(context),
+                width = gl.outputWidth,
+                height = gl.outputHeight,
+                fps = fps
+            )
+        }.onFailure { Log.w(TAG, "No se pudo abrir el grabador", it) }
+            .getOrNull()
+        if (created == null) {
+            onStatus?.invoke("No se pudo abrir el grabador del programa")
+            return false
+        }
+        if (!gl.attachRecorder(created.inputSurface)) {
+            created.stop()
+            onStatus?.invoke("El compositor no pudo entregar el cuadro al grabador")
+            return false
+        }
+        created.start()
+        recorder = created
+        lastRecording = null
+        onStatus?.invoke("Grabando el programa · ${created.file.name}")
+        return true
+    }
+
+    /** Corta la grabación y devuelve el MP4, o null si no quedó nada. */
+    fun stopRecording(): File? {
+        val active = recorder ?: return null
+        recorder = null
+        compositor?.detachRecorder()
+        val file = runCatching { active.stop() }.getOrNull()
+        if (file != null) {
+            lastRecording = file
+            onStatus?.invoke("Grabación guardada · ${file.name}")
+        } else {
+            onStatus?.invoke("La grabación quedó vacía: no llegó ningún cuadro")
+        }
+        return file
     }
 
     /** Ganancia del canal A (micrófono) y del canal B (NDI). */
@@ -156,6 +245,7 @@ class MixerEngine(private val context: Context) {
         }
         sender = output
         compositor = gl
+        gl.setKey(keyMode, keyRed, keyGreen, keyBlue, keySimilarity, keySoftness)
         running = true
         program = GlCompositor.INPUT_A
         startAudio()
@@ -172,6 +262,8 @@ class MixerEngine(private val context: Context) {
         if (!running || microphone != null) return
         audio.onMixed = { pcm, samples, channels, rate ->
             sender?.sendAudio(pcm, samples, channels, rate)
+            // La grabación lleva exactamente el mismo audio que sale por NDI.
+            recorder?.submitAudio(pcm, samples, channels, rate)
         }
         audio.onLevels = { levels ->
             mainHandler.post { if (running) onAudioLevels?.invoke(levels) }
@@ -206,6 +298,12 @@ class MixerEngine(private val context: Context) {
     fun stop() {
         val gl = compositor
         compositor = null
+        if (recorder != null) {
+            val active = recorder
+            recorder = null
+            gl?.detachRecorder()
+            lastRecording = runCatching { active?.stop() }.getOrNull() ?: lastRecording
+        }
         gl?.stop()
         audio.stop()
         audio.onMixed = null

@@ -156,6 +156,7 @@ import com.ndiapp.camera.media.MediaPlaylistPlayer
 import com.ndiapp.camera.ndi.NdiFinder
 import com.ndiapp.camera.mixer.AudioMixer
 import com.ndiapp.camera.mixer.GlCompositor
+import com.ndiapp.camera.mixer.MixerApi
 import com.ndiapp.camera.mixer.MixerEngine
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiReceiverController
@@ -173,6 +174,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.min
@@ -4155,6 +4158,17 @@ private fun MixerTab(
     var layerAnchor by remember { mutableIntStateOf(GlCompositor.ANCHOR_BOTTOM_RIGHT) }
     var layerOpacity by remember { mutableFloatStateOf(1f) }
     var layerBorder by remember { mutableStateOf(true) }
+    var keyMode by remember { mutableIntStateOf(GlCompositor.KEY_OFF) }
+    var keyColor by remember { mutableIntStateOf(mixerKeyColors[0].second) }
+    var keySimilarity by remember { mutableFloatStateOf(0.18f) }
+    var keySoftness by remember { mutableFloatStateOf(0.12f) }
+    var recording by remember { mutableStateOf(false) }
+    var recordSeconds by remember { mutableIntStateOf(0) }
+    var recordFile by remember { mutableStateOf<String?>(null) }
+    var apiRunning by remember { mutableStateOf(false) }
+    var apiAddress by remember { mutableStateOf("") }
+    val api = remember { MixerApi() }
+    val apiHandler = remember { Handler(Looper.getMainLooper()) }
 
     val layerScale =
         if (layerMode == GlCompositor.LAYER_OVERLAY) overlayScale else pipScale
@@ -4210,6 +4224,7 @@ private fun MixerTab(
         mix = 0f
         cameraLive = false
         ndiLive = false
+        recording = false
         audioLevels = AudioMixer.Levels()
     }
 
@@ -4223,6 +4238,20 @@ private fun MixerTab(
         engine.setLayerAnchor(layerAnchor)
         engine.setLayerOpacity(layerOpacity)
         engine.setLayerBorder(layerBorder)
+    }
+
+    // El keyer se reaplica al cambiar y al arrancar la mezcla.
+    LaunchedEffect(running, keyMode, keyColor, keySimilarity, keySoftness) {
+        if (!running) return@LaunchedEffect
+        val rgb = keyColorRgb(keyColor)
+        engine.setKey(keyMode, rgb[0], rgb[1], rgb[2], keySimilarity, keySoftness)
+    }
+
+    LaunchedEffect(recording) {
+        while (recording) {
+            recordSeconds = engine.recordingSeconds
+            delay(500)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -4259,6 +4288,7 @@ private fun MixerTab(
             engine.stop()
             running = false
             starting = false
+            recording = false
             program = GlCompositor.INPUT_A
             preview = GlCompositor.INPUT_A
             frame = null
@@ -4294,6 +4324,192 @@ private fun MixerTab(
             engine.cutTo(GlCompositor.INPUT_A)
             program = GlCompositor.INPUT_A
             preview = GlCompositor.INPUT_A
+        }
+    }
+
+    val startProgramRecording: () -> Unit = {
+        if (!running) {
+            status = "Arrancá la mezcla para grabar el programa"
+        } else if (!recording) {
+            val ok = engine.startRecording()
+            recording = ok
+            if (ok) {
+                recordSeconds = 0
+                recordFile = null
+            }
+        }
+    }
+
+    val stopProgramRecording: () -> Unit = {
+        if (recording) {
+            recordFile = engine.stopRecording()?.absolutePath
+            recording = false
+        }
+    }
+
+    // Lo mismo que los botones, pero por HTTP desde otro equipo de la red.
+    val apiCommand: (String, Map<String, String>) -> String = command@{ path, params ->
+        fun param(name: String): String? = params[name]?.trim()?.takeIf { it.isNotEmpty() }
+        fun flag(name: String, fallback: Boolean): Boolean = when (param(name)?.lowercase()) {
+            null -> fallback
+            "1", "true", "on", "si", "sí", "yes" -> true
+            "0", "false", "off", "no" -> false
+            else -> fallback
+        }
+        fun number(name: String, fallback: Float): Float =
+            param(name)?.replace(',', '.')?.toFloatOrNull() ?: fallback
+        fun slotOf(): Int =
+            if (param("input")?.lowercase() == "b") GlCompositor.INPUT_B
+            else GlCompositor.INPUT_A
+        fun slotName(slot: Int): String = if (slot == GlCompositor.INPUT_B) "B" else "A"
+        fun ok(body: String = ""): String = "{\"ok\":true" + body + "}"
+
+        when (path) {
+            "/status" -> ok(
+                ",\"running\":$running" +
+                    ",\"program\":\"${slotName(program)}\"" +
+                    ",\"mix\":${(mix * 100).roundToInt() / 100f}" +
+                    ",\"layer\":\"${mixerLayerLabel(layerMode)}\"" +
+                    ",\"key\":\"${mixerKeyLabel(keyMode)}\"" +
+                    ",\"recording\":$recording" +
+                    ",\"recordSeconds\":$recordSeconds" +
+                    ",\"recordFile\":\"${recordFile.orEmpty()}\"" +
+                    ",\"micGain\":$micGain,\"ndiGain\":$ndiGain" +
+                    ",\"micOpen\":$micOpen,\"ndiOpen\":$ndiOpen" +
+                    ",\"api\":\"$apiAddress\""
+            )
+
+            "/cut", "/fade" -> {
+                if (!running) return@command "{\"ok\":false,\"error\":\"la mezcla no está al aire\"}"
+                if (layerMode != GlCompositor.LAYER_MIX) {
+                    return@command "{\"ok\":false,\"error\":\"el programa está en capas; pasá a mix\"}"
+                }
+                val slot = slotOf()
+                if (path == "/cut") {
+                    engine.cutTo(slot)
+                } else {
+                    val milliseconds = (param("ms")?.toIntOrNull() ?: fadeMs).coerceIn(0, 5000)
+                    engine.fadeTo(slot, milliseconds)
+                }
+                program = slot
+                preview = slot
+                ok(",\"program\":\"${slotName(slot)}\"")
+            }
+
+            "/layer" -> {
+                val mode = when (param("mode")?.lowercase()) {
+                    "mix" -> GlCompositor.LAYER_MIX
+                    "pip" -> GlCompositor.LAYER_PIP
+                    "overlay" -> GlCompositor.LAYER_OVERLAY
+                    null -> layerMode
+                    else -> return@command "{\"ok\":false,\"error\":\"mode debe ser mix, pip u overlay\"}"
+                }
+                layerMode = mode
+                if (mode != GlCompositor.LAYER_MIX) {
+                    engine.cutTo(GlCompositor.INPUT_A)
+                    program = GlCompositor.INPUT_A
+                    preview = GlCompositor.INPUT_A
+                }
+                param("scale")?.replace(',', '.')?.toFloatOrNull()?.let { scale ->
+                    if (mode == GlCompositor.LAYER_OVERLAY) {
+                        overlayScale = scale.coerceIn(0.5f, 1.1f)
+                    } else {
+                        pipScale = scale.coerceIn(0.15f, 0.6f)
+                    }
+                }
+                param("anchor")?.let { value ->
+                    layerAnchor = when (value.lowercase()) {
+                        "tl", "arriba-izquierda" -> GlCompositor.ANCHOR_TOP_LEFT
+                        "tr", "arriba-derecha" -> GlCompositor.ANCHOR_TOP_RIGHT
+                        "bl", "abajo-izquierda" -> GlCompositor.ANCHOR_BOTTOM_LEFT
+                        "br", "abajo-derecha" -> GlCompositor.ANCHOR_BOTTOM_RIGHT
+                        "center", "centro" -> GlCompositor.ANCHOR_CENTER
+                        else -> layerAnchor
+                    }
+                }
+                layerOpacity = number("opacity", layerOpacity).coerceIn(0.2f, 1f)
+                layerBorder = flag("border", layerBorder)
+                engine.setLayerMode(mode)
+                engine.setLayerScale(layerScale)
+                engine.setLayerAnchor(layerAnchor)
+                engine.setLayerOpacity(layerOpacity)
+                engine.setLayerBorder(layerBorder)
+                ok(",\"layer\":\"${mixerLayerLabel(mode)}\"")
+            }
+
+            "/audio" -> {
+                micGain = number("mic", micGain).coerceIn(0f, 4f)
+                ndiGain = number("ndi", ndiGain).coerceIn(0f, 4f)
+                micOpen = flag("micOpen", micOpen)
+                ndiOpen = flag("ndiOpen", ndiOpen)
+                engine.micGain = micGain
+                engine.ndiGain = ndiGain
+                engine.micOpen = micOpen
+                engine.ndiOpen = ndiOpen
+                ok(
+                    ",\"micGain\":$micGain,\"ndiGain\":$ndiGain" +
+                        ",\"micOpen\":$micOpen,\"ndiOpen\":$ndiOpen"
+                )
+            }
+
+            "/key" -> {
+                val mode = when (param("mode")?.lowercase()) {
+                    "off", "apagado", "0" -> GlCompositor.KEY_OFF
+                    "chroma", "croma", "1" -> GlCompositor.KEY_CHROMA
+                    "luma", "2" -> GlCompositor.KEY_LUMA
+                    null -> keyMode
+                    else -> return@command "{\"ok\":false,\"error\":\"mode debe ser off, chroma o luma\"}"
+                }
+                param("color")?.removePrefix("#")?.toLongOrNull(16)?.let { value ->
+                    keyColor = (value and 0xFFFFFF).toInt()
+                }
+                keySimilarity = number("similarity", keySimilarity).coerceIn(0.01f, 1f)
+                keySoftness = number("softness", keySoftness).coerceIn(0.001f, 1f)
+                keyMode = mode
+                val rgb = keyColorRgb(keyColor)
+                engine.setKey(mode, rgb[0], rgb[1], rgb[2], keySimilarity, keySoftness)
+                ok(",\"key\":\"${mixerKeyLabel(mode)}\"")
+            }
+
+            "/record" -> {
+                val action = param("action")?.lowercase() ?: if (recording) "stop" else "start"
+                when (action) {
+                    "start", "grabar", "on" -> startProgramRecording()
+                    "stop", "detener", "off" -> stopProgramRecording()
+                    else -> return@command "{\"ok\":false,\"error\":\"action debe ser start o stop\"}"
+                }
+                ok(
+                    ",\"recording\":$recording,\"recordSeconds\":$recordSeconds" +
+                        ",\"recordFile\":\"${recordFile.orEmpty()}\""
+                )
+            }
+
+            else -> "{\"ok\":false,\"error\":\"ruta desconocida\"}"
+        }
+    }
+
+    DisposableEffect(Unit) {
+        api.onCommand = { path, params ->
+            val latch = CountDownLatch(1)
+            var response = "{\"ok\":false,\"error\":\"el mezclador no respondió\"}"
+            apiHandler.post {
+                response = runCatching { apiCommand(path, params) }
+                    .getOrElse { "{\"ok\":false,\"error\":\"comando inválido\"}" }
+                latch.countDown()
+            }
+            latch.await(2, TimeUnit.SECONDS)
+            response
+        }
+        apiRunning = api.start()
+        if (apiRunning) {
+            val net = localNetwork(context)
+            val host = net.address.ifBlank { "0.0.0.0" }
+            apiAddress = "$host:${MixerApi.DEFAULT_PORT}"
+        }
+        onDispose {
+            api.stop()
+            apiRunning = false
+            apiAddress = ""
         }
     }
 
@@ -4607,6 +4823,104 @@ private fun MixerTab(
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
             Text(
+                "Keyer · entrada B",
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            Text(
+                when (keyMode) {
+                    GlCompositor.KEY_CHROMA ->
+                        "B pierde el color de fondo y deja ver la cámara por transparencia."
+                    GlCompositor.KEY_LUMA ->
+                        "B pierde los píxeles del brillo elegido (negro para fondos oscuros)."
+                    else -> "Sin keyer: B entra completa, también en PiP y overlay."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = NdiGlass.Muted
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MixerButton(
+                    "APAGADO",
+                    active = keyMode == GlCompositor.KEY_OFF,
+                    enabled = running
+                ) { keyMode = GlCompositor.KEY_OFF }
+                MixerButton(
+                    "CHROMA",
+                    active = keyMode == GlCompositor.KEY_CHROMA,
+                    accent = Color(0xFF4ADE80),
+                    enabled = running
+                ) { keyMode = GlCompositor.KEY_CHROMA }
+                MixerButton(
+                    "LUMA",
+                    active = keyMode == GlCompositor.KEY_LUMA,
+                    accent = Color(0xFFB0B7C3),
+                    enabled = running
+                ) { keyMode = GlCompositor.KEY_LUMA }
+            }
+            if (keyMode != GlCompositor.KEY_OFF) {
+                if (keyMode == GlCompositor.KEY_CHROMA) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        mixerKeyColors.forEach { (label, value) ->
+                            MixerButton(
+                                label,
+                                active = keyColor == value,
+                                accent = Color(0xFF4ADE80),
+                                enabled = running
+                            ) { keyColor = value }
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Similitud",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Muted
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "${(keySimilarity * 100).roundToInt()} %",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Text
+                    )
+                }
+                Slider(
+                    value = keySimilarity,
+                    onValueChange = { value -> keySimilarity = value },
+                    valueRange = 0.03f..0.6f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = NdiGlass.BlueBright,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                    )
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Suavizado",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Muted
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "${(keySoftness * 100).roundToInt()} %",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Text
+                    )
+                }
+                Slider(
+                    value = keySoftness,
+                    onValueChange = { value -> keySoftness = value },
+                    valueRange = 0.01f..0.4f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = NdiGlass.BlueBright,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                    )
+                )
+            }
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            Text(
                 "Audio · micrófono + NDI",
                 style = MaterialTheme.typography.labelMedium,
                 color = NdiGlass.Text
@@ -4669,6 +4983,39 @@ private fun MixerTab(
                 LevelMeter(audioLevels.masterLeft, audioLevels.masterRight)
             }
 
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Grabación · programa",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = NdiGlass.Text
+                    )
+                    Text(
+                        when {
+                            recording ->
+                                "Grabando ${recordSeconds / 60}:" +
+                                    "${(recordSeconds % 60).toString().padStart(2, '0')} · " +
+                                    (engine.recordingPath?.substringAfterLast('/') ?: "MP4")
+                            recordFile != null ->
+                                "Guardado en ${recordFile?.substringAfter("Grabaciones/")}"
+                            else -> "MP4 con el cuadro compuesto y la mezcla de audio"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (recording) Color(0xFFFF6B60) else NdiGlass.Muted
+                    )
+                }
+                MixerButton(
+                    if (recording) "DETENER" else "GRABAR",
+                    active = recording,
+                    accent = Color(0xFFFF3B30),
+                    enabled = running
+                ) { if (recording) stopProgramRecording() else startProgramRecording() }
+            }
+
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
             Text(
                 status,
@@ -4682,14 +5029,54 @@ private fun MixerTab(
                     else -> "Arrancar la mezcla"
                 }
             ) { if (!starting) toggleMix() }
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
             Text(
-                "El próximo paso es la API HTTP, los keyers y la grabación del programa.",
+                "API HTTP · control desde la red",
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            Text(
+                if (apiRunning) "http://$apiAddress" else
+                    "No se pudo abrir el puerto ${MixerApi.DEFAULT_PORT}",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (apiRunning) Color(0xFF4ADE80) else Color(0xFFFFC857)
+            )
+            Text(
+                "/status · /cut?input=b · /fade?input=b&ms=500 · " +
+                    "/layer?mode=pip&scale=0.34&anchor=br · " +
+                    "/audio?mic=1&ndi=1&micOpen=1 · " +
+                    "/key?mode=chroma&color=00B140 · /record?action=start",
                 style = MaterialTheme.typography.labelSmall,
                 color = NdiGlass.Muted.copy(alpha = 0.8f)
             )
             Spacer(Modifier.height(20.dp))
         }
     }
+}
+
+/** Colores de fondo habituales para el keyer de croma. */
+private val mixerKeyColors = listOf(
+    "Verde" to 0x00B140,
+    "Azul" to 0x0047BB,
+    "Magenta" to 0xFF00FF,
+)
+
+private fun keyColorRgb(value: Int): FloatArray = floatArrayOf(
+    ((value shr 16) and 0xFF) / 255f,
+    ((value shr 8) and 0xFF) / 255f,
+    (value and 0xFF) / 255f
+)
+
+private fun mixerLayerLabel(mode: Int): String = when (mode) {
+    GlCompositor.LAYER_PIP -> "pip"
+    GlCompositor.LAYER_OVERLAY -> "overlay"
+    else -> "mix"
+}
+
+private fun mixerKeyLabel(mode: Int): String = when (mode) {
+    GlCompositor.KEY_CHROMA -> "chroma"
+    GlCompositor.KEY_LUMA -> "luma"
+    else -> "off"
 }
 
 /** Esquinas y centro donde se puede anclar la capa B. */
