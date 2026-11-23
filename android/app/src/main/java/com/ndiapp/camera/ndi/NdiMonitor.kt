@@ -142,6 +142,12 @@ class NdiReceiverController {
     val isRunning: Boolean
         get() = handle != 0L
 
+    /**
+     * Cuadro RGBA tal como llega de la red, sin pasar por Bitmap. Lo usa el
+     * mezclador para subirlo a una textura GL mientras el búfer sigue válido.
+     */
+    var onRgbaFrame: ((rgba: ByteArray, width: Int, height: Int) -> Unit)? = null
+
     fun start(
         scope: CoroutineScope,
         source: NdiSource,
@@ -149,7 +155,8 @@ class NdiReceiverController {
         lowBandwidth: Boolean = false,
         /** Alto máximo del cuadro entregado a la UI; 0 deja el de la fuente. */
         maxHeight: () -> Int = { 0 },
-        onFrame: (Bitmap) -> Unit,
+        /** null cuando sólo interesa el cuadro RGBA crudo (mezclador). */
+        onFrame: ((Bitmap) -> Unit)? = null,
         onStats: (StreamStats) -> Unit = {}
     ) {
         // El anterior se destruye recién cuando su hilo salió de libndi.
@@ -193,41 +200,47 @@ class NdiReceiverController {
                         }
                         if (width > 0 && height > 0 && poll[0] == 1) {
                             frames++
-                            // La copia del RGBA y la reducción se hacen en este hilo:
-                            // al principal solo llega el cuadro ya listo para pintar.
-                            val limit = maxHeight()
-                            val outHeight = if (limit in 1 until height) limit else height
-                            val outWidth = if (outHeight == height) {
-                                width
-                            } else {
-                                ((width.toLong() * outHeight / height).toInt() and -2)
-                                    .coerceAtLeast(2)
-                            }
-                            val full = reusableBitmap(sourceFrame, width, height) {
-                                sourceFrame = it
-                            }
-                            full.copyPixelsFromBuffer(
-                                ByteBuffer.wrap(rgbaBuffer, 0, width * height * 4)
-                            )
-                            val output = if (outWidth == width && outHeight == height) {
-                                full
-                            } else {
-                                // Dos bitmaps alternos: el visor pinta uno mientras se
-                                // escribe el otro, sin cortes ni asignaciones por cuadro.
-                                val slotB = useScaledB
-                                useScaledB = !useScaledB
-                                val spare = if (slotB) scaledB else scaledA
-                                val bitmap = reusableBitmap(spare, outWidth, outHeight) {
-                                    if (slotB) scaledB = it else scaledA = it
+                            onRgbaFrame?.invoke(rgbaBuffer, width, height)
+                            val sink = onFrame
+                            if (sink != null) {
+                                // La copia del RGBA y la reducción se hacen en este hilo:
+                                // al principal solo llega el cuadro ya listo para pintar.
+                                val limit = maxHeight()
+                                val outHeight = if (limit in 1 until height) limit else height
+                                val outWidth = if (outHeight == height) {
+                                    width
+                                } else {
+                                    ((width.toLong() * outHeight / height).toInt() and -2)
+                                        .coerceAtLeast(2)
                                 }
-                                sourceRect.set(0, 0, width, height)
-                                targetRect.set(0, 0, outWidth, outHeight)
-                                Canvas(bitmap).drawBitmap(full, sourceRect, targetRect, scalePaint)
-                                bitmap
+                                val full = reusableBitmap(sourceFrame, width, height) {
+                                    sourceFrame = it
+                                }
+                                full.copyPixelsFromBuffer(
+                                    ByteBuffer.wrap(rgbaBuffer, 0, width * height * 4)
+                                )
+                                val output = if (outWidth == width && outHeight == height) {
+                                    full
+                                } else {
+                                    // Dos bitmaps alternos: el visor pinta uno mientras se
+                                    // escribe el otro, sin cortes ni asignaciones por cuadro.
+                                    val slotB = useScaledB
+                                    useScaledB = !useScaledB
+                                    val spare = if (slotB) scaledB else scaledA
+                                    val bitmap = reusableBitmap(spare, outWidth, outHeight) {
+                                        if (slotB) scaledB = it else scaledA = it
+                                    }
+                                    sourceRect.set(0, 0, width, height)
+                                    targetRect.set(0, 0, outWidth, outHeight)
+                                    Canvas(bitmap).drawBitmap(
+                                        full, sourceRect, targetRect, scalePaint
+                                    )
+                                    bitmap
+                                }
+                                shownWidth = outWidth
+                                shownHeight = outHeight
+                                withContext(Dispatchers.Main) { sink(output) }
                             }
-                            shownWidth = outWidth
-                            shownHeight = outHeight
-                            withContext(Dispatchers.Main) { onFrame(output) }
                         }
                     }
 

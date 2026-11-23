@@ -111,6 +111,13 @@ class CameraSession(private val context: Context) {
     var onYuvFrame: ((YuvFrame) -> Unit)? = null
 
     /**
+     * Cuadro RGBA ya rotado, antes de NDI. Lo usa el mezclador: mientras haya
+     * un receptor puesto, el cuadro va al compositor en vez de salir directo.
+     */
+    @Volatile
+    var onRgbaFrame: ((ByteArray, Int, Int) -> Unit)? = null
+
+    /**
      * PCM del micrófono tal como sale de la captura. Lo usa la salida SRT,
      * que lleva el mismo sonido que la fuente NDI aunque NDI esté apagado.
      */
@@ -314,7 +321,12 @@ class CameraSession(private val context: Context) {
                         if (rgbaBuffer.size < needed) rgbaBuffer = ByteArray(needed)
                         val dims = Yuv.toRgba(proxy, rotation, rgbaBuffer)
                         averageLuma = Yuv.averageLuma(proxy)
-                        sender?.sendVideo(rgbaBuffer, dims[0], dims[1], req.fps)
+                        val rgbSink = onRgbaFrame
+                        if (rgbSink != null) {
+                            rgbSink(rgbaBuffer, dims[0], dims[1])
+                        } else {
+                            sender?.sendVideo(rgbaBuffer, dims[0], dims[1], req.fps)
+                        }
                     } catch (t: Throwable) {
                         Log.w(TAG, "No se pudo procesar el frame", t)
                     } finally {
@@ -552,7 +564,12 @@ class CameraSession(private val context: Context) {
             )
             averageLuma = Yuv.averageLuma(width, height, y.buffer, y.rowStride, y.pixelStride)
             publishPreview(dims[0], dims[1])
-            sender?.sendVideo(rgbaBuffer, dims[0], dims[1], fps)
+            val rgbSink = onRgbaFrame
+            if (rgbSink != null) {
+                rgbSink(rgbaBuffer, dims[0], dims[1])
+            } else {
+                sender?.sendVideo(rgbaBuffer, dims[0], dims[1], fps)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "No se pudo procesar el frame de Camera2", t)
         }

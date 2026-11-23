@@ -154,6 +154,8 @@ import com.ndiapp.camera.media.MediaItem
 import com.ndiapp.camera.media.MediaKind
 import com.ndiapp.camera.media.MediaPlaylistPlayer
 import com.ndiapp.camera.ndi.NdiFinder
+import com.ndiapp.camera.mixer.GlCompositor
+import com.ndiapp.camera.mixer.MixerEngine
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiReceiverController
 import com.ndiapp.camera.ndi.StreamStats
@@ -350,7 +352,7 @@ private fun setSystemBarsVisible(activity: Activity?, visible: Boolean) {
     }
 }
 
-private enum class Screen { CAMERA, SCREEN, MULTIMEDIA, UVC, AUDIO, MONITOR, SRT }
+private enum class Screen { CAMERA, SCREEN, MULTIMEDIA, UVC, AUDIO, MONITOR, MIXER, SRT }
 
 /** Cámara USB conectada con la app ya abierta: lleva al visor de esa fuente. */
 private val usbAttachSignal = mutableIntStateOf(0)
@@ -470,6 +472,11 @@ private fun AppRoot() {
                 Screen.UVC -> UvcTab(onMenu = { scope.launch { drawerState.open() } })
                 Screen.AUDIO -> AudioTab(onMenu = { scope.launch { drawerState.open() } })
                 Screen.MONITOR -> MonitorTab(onMenu = { scope.launch { drawerState.open() } })
+                Screen.MIXER -> MixerTab(
+                    camera = camera,
+                    lifecycleOwner = lifecycleOwner,
+                    onMenu = { scope.launch { drawerState.open() } }
+                )
                 Screen.SRT -> SrtTab(
                     onMenu = { scope.launch { drawerState.open() } },
                     srtUrl = camera.srtTxUrl,
@@ -2820,6 +2827,12 @@ private fun MenuSheet(
                     selected = screen == Screen.AUDIO
                 ) { onSelect(Screen.AUDIO) }
                 MenuEntry(
+                    icon = DockIcon.GRID,
+                    title = "Mezclador",
+                    subtitle = "Dos entradas con CUT y fade por NDI",
+                    selected = screen == Screen.MIXER
+                ) { onSelect(Screen.MIXER) }
+                MenuEntry(
                     icon = DockIcon.MEDIA,
                     title = "Captura UVC",
                     subtitle = "Cámara USB como fuente NDI",
@@ -4073,6 +4086,429 @@ private class NdiVideoView(context: Context) : android.view.View(context) {
         val top = (height - drawH) / 2
         target.set(left, top, left + drawW, top + drawH)
         canvas.drawBitmap(bmp, null, target, paint)
+    }
+}
+
+// --------------------------------------------------------------- mezclador --
+
+/**
+ * Mezclador de dos entradas: la cámara de la app (A) y una fuente NDI (B).
+ *
+ * El programa sale por una sola fuente NDI compuesta en GL: mientras la mezcla
+ * está al aire, la cámara deja de emitir por su cuenta y sus cuadros entran al
+ * compositor. A y B eligen la vista previa; CUT y FADE la ponen en el aire.
+ */
+@Composable
+private fun MixerTab(
+    camera: CameraUi,
+    lifecycleOwner: LifecycleOwner,
+    onMenu: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val finder = remember { sharedNdiFinder }
+    val receiver = remember { NdiReceiverController() }
+    val engine = remember { MixerEngine() }
+
+    var granted by remember { mutableStateOf(hasCameraPermissions(context)) }
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        granted = hasCameraPermissions(context)
+    }
+
+    var sources by remember { mutableStateOf(emptyList<NdiSource>()) }
+    var source by remember { mutableStateOf<NdiSource?>(null) }
+    var running by remember { mutableStateOf(false) }
+    var starting by remember { mutableStateOf(false) }
+    var program by remember { mutableIntStateOf(GlCompositor.INPUT_A) }
+    var preview by remember { mutableIntStateOf(GlCompositor.INPUT_A) }
+    var mix by remember { mutableFloatStateOf(0f) }
+    var fadeMs by remember { mutableIntStateOf(500) }
+    var status by remember { mutableStateOf("Elegí la entrada B y arrancá la mezcla") }
+    var frame by remember { mutableStateOf<Bitmap?>(null) }
+    var cameraLive by remember { mutableStateOf(false) }
+    var ndiLive by remember { mutableStateOf(false) }
+
+    val outputHeight = if (camera.height >= 1080) 1080 else 720
+    val outputWidth = outputHeight * 16 / 9
+
+    LaunchedEffect(Unit) {
+        if (!granted) launcher.launch(requiredPermissions)
+    }
+
+    // La cámara es la entrada A: se abre acá si todavía no estaba encendida.
+    LaunchedEffect(granted) {
+        if (!granted) return@LaunchedEffect
+        if (!camera.previewing) {
+            withContext(Dispatchers.IO) { ensureWifiBinding(context) }
+            MulticastLock.ensure(context)
+            camera.openPreview(lifecycleOwner)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        engine.onPreview = { bitmap -> frame = bitmap }
+        engine.onStatus = { message -> status = message }
+        onDispose {
+            // Al salir, la cámara vuelve a mandar directo a NDI si sigue abierta.
+            camera.session.onRgbaFrame = null
+            receiver.onRgbaFrame = null
+            receiver.stop()
+            engine.stop()
+        }
+    }
+
+    // Con la mezcla al aire hay una sola salida: el programa.
+    LaunchedEffect(running) {
+        camera.session.onRgbaFrame = if (running) {
+            { rgba, width, height -> engine.submitCamera(rgba, width, height) }
+        } else {
+            null
+        }
+    }
+
+    LaunchedEffect(running) {
+        while (running) {
+            mix = engine.mix
+            cameraLive = engine.cameraFrames > 0
+            ndiLive = engine.ndiFrames > 0
+            delay(150)
+        }
+        mix = 0f
+        cameraLive = false
+        ndiLive = false
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            withContext(Dispatchers.IO) { ensureWifiBinding(context) }
+            sources = withContext(Dispatchers.IO) { finder.sources() }
+            MulticastLock.ensure(context)
+            delay(2500)
+        }
+    }
+
+    // La entrada B entrega sus cuadros crudos al compositor, sin Bitmap de por medio.
+    LaunchedEffect(source) {
+        receiver.stop()
+        receiver.onRgbaFrame = null
+        val chosen = source ?: return@LaunchedEffect
+        receiver.onRgbaFrame = { rgba, width, height ->
+            engine.submitNdi(rgba, width, height)
+        }
+        receiver.start(
+            scope = scope,
+            source = chosen,
+            audioEnabled = { false },
+            onFrame = null
+        )
+    }
+
+    val toggleMix: () -> Unit = {
+        if (running) {
+            engine.stop()
+            running = false
+            starting = false
+            program = GlCompositor.INPUT_A
+            preview = GlCompositor.INPUT_A
+            frame = null
+            status = "Mezcla detenida"
+        } else if (granted && !starting) {
+            // La fuente directa de la cámara se apaga: el programa la reemplaza.
+            if (camera.running) camera.stop()
+            starting = true
+            val width = outputWidth
+            val height = outputHeight
+            val fps = camera.fps
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    engine.start(width, height, fps)
+                }
+                running = ok
+                starting = false
+                program = GlCompositor.INPUT_A
+                preview = GlCompositor.INPUT_A
+                status = if (ok) {
+                    "Programa al aire: «NDI App (Mezcla)»"
+                } else {
+                    "No se pudo arrancar la mezcla"
+                }
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        TopBar(
+            modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
+            trailing = {
+                Text(
+                    if (running) "MEZCLA · NDI" else "Mezcla",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (running) Color(0xFFFF6B60) else NdiGlass.Muted
+                )
+            },
+            onMenu = onMenu
+        )
+        Column(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color.Black)
+            ) {
+                frame?.let { bitmap ->
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Programa del mezclador",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+                if (frame == null) {
+                    Text(
+                        if (running) "Esperando cuadros" else "El programa se ve al arrancar",
+                        modifier = Modifier.align(Alignment.Center),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = NdiGlass.Muted
+                    )
+                }
+                Row(
+                    Modifier.align(Alignment.BottomStart).padding(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    MixerTally("A", program == GlCompositor.INPUT_A, cameraLive)
+                    MixerTally("B", program == GlCompositor.INPUT_B, ndiLive)
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Salida ${outputWidth}×$outputHeight · ${camera.fps} fps",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NdiGlass.Muted
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (running) "NDI App (Mezcla)" else "sin emitir",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (running) Color(0xFF4ADE80) else NdiGlass.Muted
+                )
+            }
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            Text(
+                "Entrada A · Cámara",
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            Text(
+                if (cameraLive) "Con señal" else "Sin cuadros todavía",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (cameraLive) Color(0xFF4ADE80) else NdiGlass.Muted
+            )
+
+            Text(
+                "Entrada B · NDI",
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            if (sources.isEmpty()) {
+                Text(
+                    source?.name ?: "No hay fuentes NDI en la red",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NdiGlass.Muted
+                )
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    sources.forEach { entry ->
+                        val selected = source?.url == entry.url
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(
+                                    if (selected) NdiGlass.Blue.copy(alpha = 0.3f)
+                                    else Color.White.copy(alpha = 0.07f)
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selected) NdiGlass.Blue
+                                    else Color.White.copy(alpha = 0.18f),
+                                    RoundedCornerShape(50)
+                                )
+                                .clickable { source = if (selected) null else entry }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                entry.name,
+                                fontSize = 12.sp,
+                                color = NdiGlass.Text,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+            Text(
+                if (ndiLive) "Con señal" else "Sin cuadros de la red",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (ndiLive) Color(0xFF4ADE80) else NdiGlass.Muted
+            )
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            Text(
+                "Vista previa (PVW) · Transición al aire",
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                MixerButton(
+                    "A",
+                    active = preview == GlCompositor.INPUT_A,
+                    accent = NdiGlass.Blue,
+                    enabled = running
+                ) { preview = GlCompositor.INPUT_A }
+                MixerButton(
+                    "B",
+                    active = preview == GlCompositor.INPUT_B,
+                    accent = NdiGlass.Blue,
+                    enabled = running
+                ) { preview = GlCompositor.INPUT_B }
+                Spacer(Modifier.width(4.dp))
+                MixerButton("CUT", accent = Color(0xFFFF3B30), enabled = running) {
+                    engine.cutTo(preview)
+                    program = preview
+                }
+                MixerButton("FADE", accent = Color(0xFF8CCBFF), enabled = running) {
+                    engine.fadeTo(preview, fadeMs)
+                    program = preview
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "Fade",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NdiGlass.Muted
+                )
+                listOf(200, 500, 1000).forEach { value ->
+                    MixerButton(
+                        "${value} ms",
+                        active = fadeMs == value,
+                        accent = NdiGlass.Blue,
+                        enabled = running
+                    ) { fadeMs = value }
+                }
+            }
+            Text(
+                if (mix <= 0.01f) "En el aire: A"
+                else if (mix >= 0.99f) "En el aire: B"
+                else "Mezclando: ${(100 - mix * 100).roundToInt()}% A · " +
+                    "${(mix * 100).roundToInt()}% B",
+                style = MaterialTheme.typography.labelSmall,
+                color = NdiGlass.Muted
+            )
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+            Text(
+                status,
+                style = MaterialTheme.typography.labelSmall,
+                color = NdiGlass.Muted
+            )
+            PrimaryAction(
+                when {
+                    running -> "Cortar la mezcla"
+                    starting -> "Arrancando…"
+                    else -> "Arrancar la mezcla"
+                }
+            ) { if (!starting) toggleMix() }
+            Text(
+                "El audio y las capas se suman en el próximo paso.",
+                style = MaterialTheme.typography.labelSmall,
+                color = NdiGlass.Muted.copy(alpha = 0.8f)
+            )
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+/** Tally de entrada: rojo en el aire, verde con señal, gris sin cuadros. */
+@Composable
+private fun MixerTally(label: String, program: Boolean, live: Boolean) {
+    val color = when {
+        program -> Color(0xFFFF3B30)
+        live -> Color(0xFF4ADE80)
+        else -> Color.White.copy(alpha = 0.25f)
+    }
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.Black.copy(alpha = 0.6f))
+            .border(1.dp, color, RoundedCornerShape(50))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(6.dp).clip(CircleShape).background(color))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (program) "$label · PGM" else label,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+    }
+}
+
+/** Botón compacto de transición y de elección de vista previa. */
+@Composable
+private fun MixerButton(
+    text: String,
+    active: Boolean = false,
+    accent: Color = NdiGlass.Blue,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Box(
+        Modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (active) accent.copy(alpha = 0.85f)
+                else Color.White.copy(alpha = 0.08f)
+            )
+            .border(
+                1.dp,
+                if (active) accent else Color.White.copy(alpha = 0.18f),
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = if (enabled) Color.White else NdiGlass.Muted
+        )
     }
 }
 
