@@ -154,6 +154,7 @@ import com.ndiapp.camera.media.MediaItem
 import com.ndiapp.camera.media.MediaKind
 import com.ndiapp.camera.media.MediaPlaylistPlayer
 import com.ndiapp.camera.ndi.NdiFinder
+import com.ndiapp.camera.mixer.AudioMixer
 import com.ndiapp.camera.mixer.GlCompositor
 import com.ndiapp.camera.mixer.MixerEngine
 import com.ndiapp.camera.ndi.NdiNative
@@ -4108,7 +4109,7 @@ private fun MixerTab(
     val scope = rememberCoroutineScope()
     val finder = remember { sharedNdiFinder }
     val receiver = remember { NdiReceiverController() }
-    val engine = remember { MixerEngine() }
+    val engine = remember { MixerEngine(context) }
 
     var granted by remember { mutableStateOf(hasCameraPermissions(context)) }
     val launcher = rememberLauncherForActivityResult(
@@ -4129,6 +4130,12 @@ private fun MixerTab(
     var frame by remember { mutableStateOf<Bitmap?>(null) }
     var cameraLive by remember { mutableStateOf(false) }
     var ndiLive by remember { mutableStateOf(false) }
+    var micInput by remember { mutableStateOf("") }
+    var audioLevels by remember { mutableStateOf(AudioMixer.Levels()) }
+    var micGain by remember { mutableFloatStateOf(1f) }
+    var ndiGain by remember { mutableFloatStateOf(1f) }
+    var micOpen by remember { mutableStateOf(true) }
+    var ndiOpen by remember { mutableStateOf(true) }
 
     val outputHeight = if (camera.height >= 1080) 1080 else 720
     val outputWidth = outputHeight * 16 / 9
@@ -4150,6 +4157,7 @@ private fun MixerTab(
     DisposableEffect(Unit) {
         engine.onPreview = { bitmap -> frame = bitmap }
         engine.onStatus = { message -> status = message }
+        engine.onAudioLevels = { levels -> audioLevels = levels }
         onDispose {
             // Al salir, la cámara vuelve a mandar directo a NDI si sigue abierta.
             camera.session.onRgbaFrame = null
@@ -4173,11 +4181,13 @@ private fun MixerTab(
             mix = engine.mix
             cameraLive = engine.cameraFrames > 0
             ndiLive = engine.ndiFrames > 0
+            micInput = engine.micInput
             delay(150)
         }
         mix = 0f
         cameraLive = false
         ndiLive = false
+        audioLevels = AudioMixer.Levels()
     }
 
     LaunchedEffect(Unit) {
@@ -4201,7 +4211,11 @@ private fun MixerTab(
             scope = scope,
             source = chosen,
             audioEnabled = { false },
-            onFrame = null
+            onFrame = null,
+            // El audio de B no se reproduce acá: entra a la mezcla y sale por NDI.
+            onAudio = { pcm, samples, channels, rate ->
+                engine.submitNdiAudio(pcm, samples, channels, rate)
+            }
         )
     }
 
@@ -4230,7 +4244,7 @@ private fun MixerTab(
                 program = GlCompositor.INPUT_A
                 preview = GlCompositor.INPUT_A
                 status = if (ok) {
-                    "Programa al aire: «NDI App (Mezcla)»"
+                    "Programa al aire: «NDI App (Mezcla)» · audio A+B"
                 } else {
                     "No se pudo arrancar la mezcla"
                 }
@@ -4428,6 +4442,71 @@ private fun MixerTab(
             )
 
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            Text(
+                "Audio · micrófono + NDI",
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            AudioStrip(
+                title = "A · Micrófono",
+                detail = when {
+                    micInput.isNotEmpty() -> "Entrada: $micInput"
+                    running -> "Abriendo el micrófono…"
+                    else -> "Se abre con la mezcla"
+                },
+                left = audioLevels.micLeft,
+                right = audioLevels.micRight,
+                gain = micGain,
+                open = micOpen,
+                enabled = running,
+                onGain = {
+                    micGain = nextAudioMixGain(micGain)
+                    engine.micGain = micGain
+                },
+                onToggle = {
+                    micOpen = !micOpen
+                    engine.micOpen = micOpen
+                }
+            )
+            AudioStrip(
+                title = "B · NDI",
+                detail = if (ndiLive) "Audio de la fuente" else "Sin audio de la red",
+                left = audioLevels.ndiLeft,
+                right = audioLevels.ndiRight,
+                gain = ndiGain,
+                open = ndiOpen,
+                enabled = running,
+                onGain = {
+                    ndiGain = nextAudioMixGain(ndiGain)
+                    engine.ndiGain = ndiGain
+                },
+                onToggle = {
+                    ndiOpen = !ndiOpen
+                    engine.ndiOpen = ndiOpen
+                }
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "PGM · salida NDI",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = NdiGlass.Text
+                    )
+                    Text(
+                        "Suma de A y B con sus ganancias",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NdiGlass.Muted
+                    )
+                }
+                LevelMeter(audioLevels.masterLeft, audioLevels.masterRight)
+            }
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
             Text(
                 status,
                 style = MaterialTheme.typography.labelSmall,
@@ -4441,12 +4520,67 @@ private fun MixerTab(
                 }
             ) { if (!starting) toggleMix() }
             Text(
-                "El audio y las capas se suman en el próximo paso.",
+                "Las capas PiP y los overlays llegan en el próximo paso.",
                 style = MaterialTheme.typography.labelSmall,
                 color = NdiGlass.Muted.copy(alpha = 0.8f)
             )
             Spacer(Modifier.height(20.dp))
         }
+    }
+}
+
+/** Ganancia de audio por pasos: 50 %, 100 %, 150 % y 200 %. */
+private val audioMixGains = listOf(0.5f, 1f, 1.5f, 2f)
+
+private fun nextAudioMixGain(current: Float): Float {
+    val index = audioMixGains.indexOfFirst { abs(it - current) < 0.01f }
+    return audioMixGains[(index + 1).mod(audioMixGains.size)]
+}
+
+/** Canal de audio del mezclador: nivel, ganancia y mute. */
+@Composable
+private fun AudioStrip(
+    title: String,
+    detail: String,
+    left: Float,
+    right: Float,
+    gain: Float,
+    open: Boolean,
+    enabled: Boolean,
+    onGain: () -> Unit,
+    onToggle: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelMedium,
+                color = NdiGlass.Text
+            )
+            Text(
+                if (open) detail else "Silenciado en el programa",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (open) NdiGlass.Muted else Color(0xFFFFC857)
+            )
+        }
+        LevelMeter(left, right)
+        MixerButton(
+            "${(gain * 100).roundToInt()}%",
+            accent = NdiGlass.Blue,
+            enabled = enabled && open,
+            onClick = onGain
+        )
+        MixerButton(
+            if (open) "MUTE" else "MUDO",
+            active = !open,
+            accent = Color(0xFFFF3B30),
+            enabled = enabled,
+            onClick = onToggle
+        )
     }
 }
 

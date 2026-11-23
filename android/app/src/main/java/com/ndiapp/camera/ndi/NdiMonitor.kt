@@ -157,6 +157,12 @@ class NdiReceiverController {
         maxHeight: () -> Int = { 0 },
         /** null cuando sólo interesa el cuadro RGBA crudo (mezclador). */
         onFrame: ((Bitmap) -> Unit)? = null,
+        /**
+         * PCM recibido, para el mezclador de audio. Se llama desde el hilo de
+         * recepción y el búfer se reutiliza en el bloque siguiente: copiarlo si
+         * se va a guardar.
+         */
+        onAudio: ((pcm: FloatArray, samples: Int, channels: Int, sampleRate: Int) -> Unit)? = null,
         onStats: (StreamStats) -> Unit = {}
     ) {
         // El anterior se destruye recién cuando su hilo salió de libndi.
@@ -251,6 +257,9 @@ class NdiReceiverController {
                         audioRate = poll[5]
                         audioChannels = channels
                         updateLevels(pcmBuffer, samples, channels)
+                        if (samples > 0 && channels > 0) {
+                            onAudio?.invoke(pcmBuffer, samples, channels, poll[5])
+                        }
                         if (audioEnabled() && samples > 0 && channels > 0) {
                             // Copia mínima y a la cola: el hilo del vídeo no espera
                             // a que el AudioTrack acepte el bloque.

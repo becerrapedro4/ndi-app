@@ -1,9 +1,11 @@
 package com.ndiapp.camera.mixer
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.ndiapp.camera.media.AudioCapture
 import com.ndiapp.camera.ndi.NdiNative
 import com.ndiapp.camera.ndi.NdiSender
 import java.nio.ByteBuffer
@@ -14,8 +16,12 @@ import java.nio.ByteBuffer
  * El vídeo de cada entrada llega como RGBA y se entrega al compositor GL, que
  * compone el programa con su propio reloj. Nada de lo que entra se manda directo
  * a NDI: la única salida es el cuadro compuesto.
+ *
+ * El audio se mezcla aparte, con su propio reloj: el micrófono del teléfono (A)
+ * y el audio de la fuente NDI (B) salen sumados por el canal de audio de la
+ * misma fuente NDI del programa.
  */
-class MixerEngine {
+class MixerEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "MixerEngine"
@@ -26,6 +32,9 @@ class MixerEngine {
     var onPreview: ((Bitmap) -> Unit)? = null
 
     var onStatus: ((String) -> Unit)? = null
+
+    /** Niveles de audio para los medidores; llega en el hilo principal. */
+    var onAudioLevels: ((AudioMixer.Levels) -> Unit)? = null
 
     @Volatile
     var running = false
@@ -39,6 +48,8 @@ class MixerEngine {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var sender: NdiSender? = null
     private var compositor: GlCompositor? = null
+    private val audio = AudioMixer()
+    private var microphone: AudioCapture? = null
     private var fps = 30
     private var name = "NDI App (Mezcla)"
 
@@ -54,6 +65,35 @@ class MixerEngine {
 
     val ndiFrames: Long
         get() = compositor?.framesB ?: 0L
+
+    /** Entrada del micrófono en uso («USB», «Sin procesar»…), vacía si no abrió. */
+    val micInput: String
+        get() = microphone?.inputLabel.orEmpty()
+
+    /** Ganancia del canal A (micrófono) y del canal B (NDI). */
+    var micGain: Float
+        get() = audio.micGain
+        set(value) {
+            audio.micGain = value
+        }
+
+    var ndiGain: Float
+        get() = audio.ndiGain
+        set(value) {
+            audio.ndiGain = value
+        }
+
+    var micOpen: Boolean
+        get() = audio.micOpen
+        set(value) {
+            audio.micOpen = value
+        }
+
+    var ndiOpen: Boolean
+        get() = audio.ndiOpen
+        set(value) {
+            audio.ndiOpen = value
+        }
 
     /** Arranca la salida NDI y el reloj del compositor. */
     fun start(width: Int, height: Int, framesPerSecond: Int): Boolean {
@@ -82,14 +122,60 @@ class MixerEngine {
         compositor = gl
         running = true
         program = GlCompositor.INPUT_A
+        startAudio()
         onStatus?.invoke("Mezcla al aire por NDI")
         return true
+    }
+
+    /**
+     * Arranca la mezcla de audio y el micrófono. El micrófono se abre acá porque
+     * la mezcla reemplaza a la fuente directa de la cámara, que era la dueña de
+     * la captura de audio.
+     */
+    private fun startAudio(attempt: Int = 0) {
+        if (!running || microphone != null) return
+        audio.onMixed = { pcm, samples, channels, rate ->
+            sender?.sendAudio(pcm, samples, channels, rate)
+        }
+        audio.onLevels = { levels ->
+            mainHandler.post { if (running) onAudioLevels?.invoke(levels) }
+        }
+        audio.start()
+        val capture = AudioCapture(
+            context,
+            onBuffer = { pcm, samples, channels, rate ->
+                audio.submitMic(pcm, samples, channels, rate)
+            }
+        )
+        val opened = runCatching { capture.start() }.isSuccess &&
+            capture.inputLabel.isNotEmpty()
+        if (!opened) {
+            capture.stop()
+            // La captura anterior de la cámara puede tardar en soltar el micrófono.
+            if (attempt < 2 && running) {
+                mainHandler.postDelayed({ startAudio(attempt + 1) }, 600L)
+            } else {
+                onStatus?.invoke("Mezcla al aire, pero el micrófono no abrió")
+            }
+            return
+        }
+        microphone = capture
+    }
+
+    /** Audio recibido por NDI (entrada B). */
+    fun submitNdiAudio(pcm: FloatArray, samples: Int, channels: Int, sampleRate: Int) {
+        audio.submitNdi(pcm, samples, channels, sampleRate)
     }
 
     fun stop() {
         val gl = compositor
         compositor = null
         gl?.stop()
+        audio.stop()
+        audio.onMixed = null
+        audio.onLevels = null
+        microphone?.stop()
+        microphone = null
         sender?.close()
         sender = null
         running = false
