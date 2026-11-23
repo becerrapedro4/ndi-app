@@ -4923,6 +4923,7 @@ private fun MixerTab(
                     }
                 }
             }
+            }
 
             MixerPanel {
                 MixerSectionHead(
