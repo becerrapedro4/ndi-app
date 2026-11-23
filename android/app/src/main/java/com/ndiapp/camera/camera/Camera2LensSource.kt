@@ -55,7 +55,21 @@ class Camera2LensSource(private val context: Context) {
 
         /** Reintentos de apertura tras una desconexión. */
         private const val MAX_REOPEN_ATTEMPTS = 4
+
+        /** Vueltas completas a la lista de configuraciones antes de rendirse. */
+        private const val MAX_SESSION_RETRIES = 3
+
+        /** Tiempo sin cuadros antes de avisar de que la lente no entrega imagen. */
+        private const val FRAME_WATCHDOG_MS = 3_000L
     }
+
+    /** Una combinación de salidas que se prueba antes de pasar a la siguiente. */
+    private data class OutputPlan(
+        val analysisSize: Size,
+        val usePhysical: Boolean,
+        val withPreview: Boolean,
+        val withRecorder: Boolean
+    )
 
     var onFrame: ((Image) -> Unit)? = null
     var onStatus: ((String) -> Unit)? = null
@@ -165,6 +179,16 @@ class Camera2LensSource(private val context: Context) {
     private var closed = false
     private var reopenAttempts = 0
 
+    // Una sola apertura y una sola sesión a la vez: abrir dos veces la misma
+    // cámara deja el dispositivo ocupado y la sesión siguiente se rechaza con
+    // CAMERA_IN_USE.
+    private var opening = false
+    private var configuringSession = false
+    private var cameraUnavailable = false
+    private var sessionPlanIndex = 0
+    private var sessionFailures = 0
+    private var lastFailure: String? = null
+
     // Exposición y estabilización: lo último medido por el AE se usa como punto
     // de partida al pasar a manual, así el cuadro no salta.
     private var aeManual = false
@@ -263,11 +287,17 @@ class Camera2LensSource(private val context: Context) {
     /** Abre la cámara guardada; si falla, se reintenta con espera creciente. */
     private fun openDevice() {
         val manager = manager ?: return
+        if (closed || opening || device != null) return
         val id = logicalId
+        opening = true
+        mainHandler.removeCallbacks(openTimeout)
+        mainHandler.postDelayed(openTimeout, 4_000)
         runCatching { manager.openCamera(id, deviceCallback, mainHandler) }
             .onFailure {
+                opening = false
                 Log.e(TAG, "No se pudo abrir $id", it)
-                onError?.invoke("No se pudo abrir la cámara: ${it.message}")
+                lastFailure = describe(it)
+                onError?.invoke("No se pudo abrir la cámara: ${describe(it)}")
                 scheduleReopen()
             }
     }
@@ -289,10 +319,30 @@ class Camera2LensSource(private val context: Context) {
         openDevice()
     }
 
-    /** Otra app soltó la cámara: se vuelve a abrir en cuanto esté disponible. */
+    /** Si el sistema nunca contesta la apertura, se vuelve a intentar. */
+    private val openTimeout = Runnable {
+        if (closed || device != null || !opening) return@Runnable
+        opening = false
+        lastFailure = "la cámara no respondió"
+        onError?.invoke("La cámara no respondió; reintentando")
+        scheduleReopen()
+    }
+
+    /**
+     * Otra app soltó la cámara: se vuelve a abrir en cuanto esté disponible.
+     * El aviso de disponibilidad llega también al registrar el callback, así que
+     * solo se reabre después de haber visto la cámara irse: si no, se pedía una
+     * segunda apertura mientras la primera seguía en curso.
+     */
     private val availabilityCallback = object : CameraManager.AvailabilityCallback() {
+        override fun onCameraUnavailable(cameraId: String) {
+            if (cameraId == logicalId) cameraUnavailable = true
+        }
+
         override fun onCameraAvailable(cameraId: String) {
-            if (closed || cameraId != logicalId || device != null) return
+            if (closed || cameraId != logicalId) return
+            if (!cameraUnavailable || device != null || opening) return
+            cameraUnavailable = false
             mainHandler.removeCallbacks(reopenRunnable)
             reopenAttempts = 0
             openDevice()
@@ -301,62 +351,127 @@ class Camera2LensSource(private val context: Context) {
 
     private val deviceCallback = object : CameraDevice.StateCallback() {
         override fun onOpened(camera: CameraDevice) {
-            if (closed) {
+            opening = false
+            // Si ya hay un dispositivo bueno, este sobra: cerrarlo sin tocar el
+            // que está entregando imagen.
+            if (closed || device != null) {
                 camera.close()
                 return
             }
+            mainHandler.removeCallbacks(openTimeout)
             device = camera
             reopenAttempts = 0
             startSessionIfReady()
         }
 
         override fun onDisconnected(camera: CameraDevice) {
+            opening = false
             camera.close()
-            device = null
+            if (device === camera) device = null
+            cameraUnavailable = true
             onError?.invoke("La cámara se desconectó; reintentando")
             scheduleReopen()
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
+            opening = false
             camera.close()
-            device = null
+            if (device === camera) device = null
+            lastFailure = "error $error"
             onError?.invoke("La cámara falló (error $error); reintentando")
             scheduleReopen()
         }
     }
 
+    /**
+     * Configuraciones que se prueban en orden. No todos los equipos aceptan la
+     * misma combinación de salidas: si el sistema rechaza la sesión completa se
+     * cae a una más simple en vez de dejar el visor en negro para siempre.
+     */
+    private fun sessionPlans(): List<OutputPlan> {
+        val size = pendingAnalysisSize ?: Size(1280, 720)
+        val recorderOutput = recorder != null
+        val hasPreview = previewSurface != null
+        val plans = mutableListOf<OutputPlan>()
+        plans += OutputPlan(size, physicalId != null, hasPreview, recorderOutput)
+        if (physicalId != null) {
+            plans += OutputPlan(size, false, hasPreview, recorderOutput)
+        }
+        if (hasPreview) {
+            plans += OutputPlan(size, false, false, recorderOutput)
+        }
+        val half = halfSize(size)
+        if (half != size) plans += OutputPlan(half, false, false, recorderOutput)
+        val quarter = halfSize(half)
+        if (quarter != half) plans += OutputPlan(quarter, false, false, false)
+        return plans
+    }
+
+    private fun halfSize(size: Size): Size = Size(
+        (size.width / 2).coerceAtLeast(320),
+        (size.height / 2).coerceAtLeast(240)
+    )
+
+    /** Lector YUV del tamaño pedido; si el tamaño cambia se rehace. */
+    private fun ensureReader(size: Size): ImageReader {
+        val existing = reader
+        if (existing != null && existing.width == size.width && existing.height == size.height) {
+            return existing
+        }
+        closeReader(existing)
+        val created = ImageReader.newInstance(
+            size.width, size.height, ImageFormat.YUV_420_888, 3
+        )
+        created.setOnImageAvailableListener({ source ->
+            if (closed) return@setOnImageAvailableListener
+            val image = runCatching { source.acquireLatestImage() }.getOrNull()
+                ?: return@setOnImageAvailableListener
+            framesSeen++
+            // La lente entrega imagen: los fallos anteriores quedaron atrás.
+            sessionFailures = 0
+            try {
+                onFrame?.invoke(image)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Frame descartado", t)
+            } finally {
+                image.close()
+            }
+        }, frameHandler)
+        reader = created
+        return created
+    }
+
+    private fun closeReader(target: ImageReader?) {
+        if (target == null) return
+        runCatching { target.setOnImageAvailableListener(null, null) }
+        runCatching { target.close() }
+    }
+
     private fun startSessionIfReady() {
         val camera = device ?: return
-        if (session != null) return
-        val surface = previewSurface
-        val analysisSize = pendingAnalysisSize ?: Size(1280, 720)
-        if (reader == null) {
-            val created = ImageReader.newInstance(
-                analysisSize.width, analysisSize.height, ImageFormat.YUV_420_888, 3
-            )
-            reader = created
-            created.setOnImageAvailableListener({ source ->
-                if (closed) return@setOnImageAvailableListener
-                val image = runCatching { source.acquireLatestImage() }.getOrNull()
-                    ?: return@setOnImageAvailableListener
-                framesSeen++
-                try {
-                    onFrame?.invoke(image)
-                } catch (t: Throwable) {
-                    Log.w(TAG, "Frame descartado", t)
-                } finally {
-                    image.close()
-                }
-            }, frameHandler)
+        if (closed || session != null || configuringSession) return
+        val plans = sessionPlans()
+        if (sessionPlanIndex >= plans.size) {
+            abandonSession(camera)
+            return
         }
-        val analysis = reader ?: return
+        val plan = plans[sessionPlanIndex]
+        val attempt = sessionPlanIndex + 1
+        val analysis = ensureReader(plan.analysisSize)
 
         val outputs = mutableListOf<OutputConfiguration>()
-        val previewConfig = surface?.let { OutputConfiguration(it) }
+        val previewConfig = if (plan.withPreview) {
+            previewSurface?.let { OutputConfiguration(it) }
+        } else {
+            null
+        }
         val analysisConfig = OutputConfiguration(analysis.surface)
-        val recorderSurface = recorderSurface()
-        val videoConfig = recorderSurface?.let { OutputConfiguration(it) }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && physicalId != null) {
+        val videoConfig = if (plan.withRecorder) {
+            recorderSurface()?.let { OutputConfiguration(it) }
+        } else {
+            null
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && plan.usePhysical && physicalId != null) {
             runCatching {
                 previewConfig?.setPhysicalCameraId(physicalId)
                 analysisConfig.setPhysicalCameraId(physicalId)
@@ -367,7 +482,8 @@ class Camera2LensSource(private val context: Context) {
         outputs += analysisConfig
         videoConfig?.let { outputs += it }
 
-        runCatching {
+        configuringSession = true
+        val created = runCatching {
             camera.createCaptureSession(
                 SessionConfiguration(
                     SessionConfiguration.SESSION_REGULAR,
@@ -375,14 +491,16 @@ class Camera2LensSource(private val context: Context) {
                     callbackExecutor,
                     object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(configured: CameraCaptureSession) {
+                            configuringSession = false
                             if (closed) {
                                 configured.close()
                                 return
                             }
                             session = configured
+                            sessionPlanIndex = 0
                             framesSeen = 0L
                             mainHandler.removeCallbacks(frameWatchdog)
-                            mainHandler.postDelayed(frameWatchdog, 3_000)
+                            mainHandler.postDelayed(frameWatchdog, FRAME_WATCHDOG_MS)
                             runCatching {
                                 configured.setRepeatingRequest(
                                     buildRequest(camera), captureCallback, mainHandler
@@ -401,16 +519,72 @@ class Camera2LensSource(private val context: Context) {
                         }
 
                         override fun onConfigureFailed(failed: CameraCaptureSession) {
-                            Log.e(TAG, "Sesión rechazada")
-                            onError?.invoke("Esta lente no admite vista previa en este equipo")
+                            Log.w(TAG, "Sesión rechazada (intento $attempt de ${plans.size})")
+                            runCatching { failed.close() }
+                            configuringSession = false
+                            session = null
+                            lastFailure = "configuración rechazada por el equipo"
+                            retryNextPlan(camera)
                         }
                     }
                 )
             )
-        }.onFailure {
-            Log.e(TAG, "createCaptureSession falló", it)
-            onError?.invoke("No se pudo abrir la lente: ${it.message}")
         }
+        created.onFailure { failure ->
+            Log.e(TAG, "createCaptureSession falló (intento $attempt de ${plans.size})", failure)
+            configuringSession = false
+            session = null
+            lastFailure = describe(failure)
+            retryNextPlan(camera)
+        }
+    }
+
+    /** Pasa a la configuración siguiente y, agotadas todas, reabre la cámara. */
+    private fun retryNextPlan(camera: CameraDevice) {
+        if (closed) return
+        sessionPlanIndex++
+        if (sessionPlanIndex < sessionPlans().size) {
+            mainHandler.post { startSessionIfReady() }
+            return
+        }
+        abandonSession(camera)
+    }
+
+    private fun abandonSession(camera: CameraDevice) {
+        if (closed) return
+        sessionPlanIndex = 0
+        configuringSession = false
+        session = null
+        sessionFailures++
+        val reason = lastFailure
+        val detail = if (reason.isNullOrBlank()) "" else " ($reason)"
+        if (sessionFailures > MAX_SESSION_RETRIES) {
+            onError?.invoke(
+                "La lente no acepta ninguna configuración$detail; probá 720p en 16:9"
+            )
+            return
+        }
+        onError?.invoke("No se pudo abrir la lente$detail; reintentando")
+        runCatching { camera.close() }
+        if (device === camera) device = null
+        scheduleReopen()
+    }
+
+    /** Mensaje corto y legible del fallo real que dio el sistema. */
+    private fun describe(failure: Throwable): String {
+        val access = generateSequence(failure as Throwable?) { it.cause }
+            .filterIsInstance<android.hardware.camera2.CameraAccessException>()
+            .firstOrNull()
+        if (access != null) {
+            return when (access.reason) {
+                1 -> "la cámara está desactivada por el sistema"
+                2 -> "la cámara se desconectó"
+                3 -> "error del controlador de la cámara"
+                4 -> "la cámara está ocupada por otra app"
+                else -> "error ${access.reason} de la cámara"
+            }
+        }
+        return failure.message?.take(120) ?: failure.javaClass.simpleName
     }
 
     /** Si la lente abrió pero no entrega ni un cuadro, se dice en el visor. */
@@ -426,6 +600,8 @@ class Camera2LensSource(private val context: Context) {
     private fun restartSession() {
         val configured = session
         session = null
+        configuringSession = false
+        sessionPlanIndex = 0
         runCatching { configured?.stopRepeating() }
         runCatching { configured?.close() }
         startSessionIfReady()
@@ -799,9 +975,12 @@ class Camera2LensSource(private val context: Context) {
 
     fun close() {
         closed = true
+        opening = false
+        configuringSession = false
         runCatching { displayManager.unregisterDisplayListener(displayListener) }
         runCatching { manager?.unregisterAvailabilityCallback(availabilityCallback) }
         mainHandler.removeCallbacks(reopenRunnable)
+        mainHandler.removeCallbacks(openTimeout)
         mainHandler.removeCallbacks(clearFocusRegion)
         mainHandler.removeCallbacks(frameWatchdog)
         runCatching { session?.stopRepeating() }
@@ -809,8 +988,9 @@ class Camera2LensSource(private val context: Context) {
         runCatching { device?.close() }
         val toClose = reader
         reader = null
-        toClose?.setOnImageAvailableListener(null, null)
-        toClose?.let { r -> frameHandler.post { runCatching { r.close() } } }
+        // Se cierra antes de apagar el hilo: un lector vivo deja la salida de la
+        // cámara reservada y la próxima apertura se rechaza.
+        closeReader(toClose)
         previewView?.holder?.removeCallback(holderCallback)
         session = null
         device = null

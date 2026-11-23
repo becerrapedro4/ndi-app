@@ -1520,10 +1520,20 @@ private fun CameraScreen(
                 recording = camera.recording,
                 recordSeconds = camera.recordSeconds,
                 trailing = {
+                    // Si la lente no abrió, el aviso ocupa dos líneas y un toque
+                    // reinicia el pipeline en el acto.
+                    val cameraFailed = camera.status.startsWith("No se pudo") ||
+                        camera.status.startsWith("La lente")
                     StatusPill(
                         running = camera.running,
                         text = camera.status,
-                        modifier = Modifier.widthIn(max = if (landscape) 260.dp else 170.dp)
+                        modifier = Modifier.widthIn(max = if (landscape) 300.dp else 210.dp),
+                        maxLines = if (cameraFailed) 2 else 1,
+                        onTap = if (cameraFailed) {
+                            { camera.restart(lifecycleOwner) }
+                        } else {
+                            null
+                        }
                     )
                 },
                 onMenu = onMenu
@@ -3110,10 +3120,13 @@ private fun StatusPill(
     running: Boolean,
     text: String,
     modifier: Modifier = Modifier,
-    warning: Boolean = false
+    warning: Boolean = false,
+    maxLines: Int = 1,
+    onTap: (() -> Unit)? = null
 ) {
     Row(
         modifier
+            .then(if (onTap != null) Modifier.clickable { onTap() } else Modifier)
             .glassSurface(
                 shape = RoundedCornerShape(50),
                 tint = Color.Black,
@@ -3141,7 +3154,7 @@ private fun StatusPill(
             text,
             style = MaterialTheme.typography.labelMedium,
             color = NdiGlass.Text,
-            maxLines = 1,
+            maxLines = maxLines,
             overflow = TextOverflow.Ellipsis
         )
     }
