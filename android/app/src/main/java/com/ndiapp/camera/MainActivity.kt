@@ -4519,15 +4519,40 @@ private fun MixerTab(
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        MixerStyle.BgTop,
+                        MixerStyle.Bg,
+                        Color(0xFF060A12)
+                    )
+                )
+            )
+    ) {
         TopBar(
             modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
             trailing = {
-                Text(
-                    if (running) "MEZCLA · NDI" else "Mezcla",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (running) Color(0xFFFF6B60) else NdiGlass.Muted
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (running) MixerStyle.Red else MixerStyle.Muted.copy(alpha = 0.6f)
+                            )
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (running) "AL AIRE" else "LISTO",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.6.sp,
+                        color = if (running) MixerStyle.Red else MixerStyle.Muted
+                    )
+                }
             },
             onMenu = onMenu
         )
@@ -4539,70 +4564,116 @@ private fun MixerTab(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Color.Black)
-            ) {
-                frame?.let { bitmap ->
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Programa del mezclador",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit
-                    )
-                }
-                if (frame == null) {
-                    Text(
-                        if (running) "Esperando cuadros" else "El programa se ve al arrancar",
-                        modifier = Modifier.align(Alignment.Center),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = NdiGlass.Muted
-                    )
-                }
+            MixerPanel {
                 Row(
-                    Modifier.align(Alignment.BottomStart).padding(10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    MixerTally("A", program == GlCompositor.INPUT_A, cameraLive)
-                    MixerTally("B", program == GlCompositor.INPUT_B, ndiLive)
+                    Text(
+                        "PROGRAM",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.9.sp,
+                        color = MixerStyle.Text
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    MixerPill(
+                        if (running) "● LIVE" else "● LISTO",
+                        if (running) MixerStyle.Red else MixerStyle.Muted
+                    )
+                    Spacer(Modifier.weight(1f))
+                    MixerPill(
+                        "${outputWidth} × $outputHeight",
+                        MixerStyle.Cyan
+                    )
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(Color(0xFF1D334B), Color(0xFF111827))
+                            )
+                        )
+                        .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+                ) {
+                    frame?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Programa del mezclador",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                    if (frame == null) {
+                        Text(
+                            if (running) "Esperando cuadros" else "El programa se ve al arrancar",
+                            modifier = Modifier.align(Alignment.Center),
+                            fontSize = 11.sp,
+                            color = MixerStyle.Muted
+                        )
+                    }
+                    Row(
+                        Modifier.align(Alignment.BottomStart).padding(9.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        MixerTally("A", program == GlCompositor.INPUT_A, cameraLive)
+                        MixerTally("B", program == GlCompositor.INPUT_B, ndiLive)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${camera.fps} fps · NDI App (Mezcla)",
+                        fontSize = 10.sp,
+                        color = MixerStyle.Muted
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        if (running) "SALIDA NDI" else "SIN EMITIR",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.6.sp,
+                        color = if (running) MixerStyle.Green else MixerStyle.Muted
+                    )
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "Salida ${outputWidth}×$outputHeight · ${camera.fps} fps",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = NdiGlass.Muted
+            MixerPanel {
+                MixerSectionHead(
+                    "Entradas",
+                    if (cameraLive && ndiLive) "2 con señal"
+                    else "${(if (cameraLive) 1 else 0) + (if (ndiLive) 1 else 0)} con señal"
                 )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    if (running) "NDI App (Mezcla)" else "sin emitir",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (running) Color(0xFF4ADE80) else NdiGlass.Muted
+                MixerInputRow(
+                    thumb = "CAM",
+                    title = "A · Cámara",
+                    detail = if (cameraLive) "NDI · con señal" else "Sin cuadros todavía",
+                    live = cameraLive,
+                    selected = program == GlCompositor.INPUT_A,
+                    action = if (program == GlCompositor.INPUT_A) "PGM" else "PVW",
+                    onClick = {
+                        if (transitionEnabled) {
+                            preview = GlCompositor.INPUT_A
+                        }
+                    }
                 )
-            }
-
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-            Text(
-                "Entrada A · Cámara",
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
-            )
-            Text(
-                if (cameraLive) "Con señal" else "Sin cuadros todavía",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (cameraLive) Color(0xFF4ADE80) else NdiGlass.Muted
-            )
-
-            Text(
-                "Entrada B · NDI",
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
-            )
+                MixerInputRow(
+                    thumb = "NDI",
+                    title = "B · Fuente NDI",
+                    detail = source?.name
+                        ?: if (sources.isEmpty()) "No hay fuentes en la red"
+                        else "${sources.size} fuentes disponibles",
+                    live = ndiLive,
+                    selected = program == GlCompositor.INPUT_B,
+                    action = if (program == GlCompositor.INPUT_B) "PGM" else "PVW",
+                    onClick = {
+                        if (transitionEnabled) {
+                            preview = GlCompositor.INPUT_B
+                        }
+                    }
+                )
             if (sources.isEmpty()) {
                 Text(
                     source?.name ?: "No hay fuentes NDI en la red",
@@ -4620,13 +4691,13 @@ private fun MixerTab(
                             Modifier
                                 .clip(RoundedCornerShape(50))
                                 .background(
-                                    if (selected) NdiGlass.Blue.copy(alpha = 0.3f)
-                                    else Color.White.copy(alpha = 0.07f)
+                                    if (selected) MixerStyle.Cyan.copy(alpha = 0.16f)
+                                    else Color.White.copy(alpha = 0.06f)
                                 )
                                 .border(
                                     1.dp,
-                                    if (selected) NdiGlass.Blue
-                                    else Color.White.copy(alpha = 0.18f),
+                                    if (selected) MixerStyle.Cyan.copy(alpha = 0.7f)
+                                    else Color.White.copy(alpha = 0.14f),
                                     RoundedCornerShape(50)
                                 )
                                 .clickable { source = if (selected) null else entry }
@@ -4634,93 +4705,111 @@ private fun MixerTab(
                         ) {
                             Text(
                                 entry.name,
-                                fontSize = 12.sp,
-                                color = NdiGlass.Text,
+                                fontSize = 11.sp,
+                                color = if (selected) MixerStyle.Cyan else MixerStyle.Text,
                                 maxLines = 1
                             )
                         }
                     }
                 }
             }
-            Text(
-                if (ndiLive) "Con señal" else "Sin cuadros de la red",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (ndiLive) Color(0xFF4ADE80) else NdiGlass.Muted
-            )
-
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-            Text(
-                "Vista previa (PVW) · Transición al aire",
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
-            )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                MixerButton(
-                    "A",
-                    active = preview == GlCompositor.INPUT_A,
-                    accent = NdiGlass.Blue,
-                    enabled = transitionEnabled
-                ) { preview = GlCompositor.INPUT_A }
-                MixerButton(
-                    "B",
-                    active = preview == GlCompositor.INPUT_B,
-                    accent = NdiGlass.Blue,
-                    enabled = transitionEnabled
-                ) { preview = GlCompositor.INPUT_B }
-                Spacer(Modifier.width(4.dp))
-                MixerButton("CUT", accent = Color(0xFFFF3B30), enabled = transitionEnabled) {
-                    engine.cutTo(preview)
-                    program = preview
-                }
-                MixerButton("FADE", accent = Color(0xFF8CCBFF), enabled = transitionEnabled) {
-                    engine.fadeTo(preview, fadeMs)
-                    program = preview
-                }
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
                 Text(
-                    "Fade",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = NdiGlass.Muted
+                    if (ndiLive) "Con señal" else "Sin cuadros de la red",
+                    fontSize = 10.sp,
+                    color = if (ndiLive) MixerStyle.Green else MixerStyle.Muted
                 )
-                listOf(200, 500, 1000).forEach { value ->
-                    MixerButton(
-                        "${value} ms",
-                        active = fadeMs == value,
-                        accent = NdiGlass.Blue,
-                        enabled = transitionEnabled
-                    ) { fadeMs = value }
-                }
             }
-            Text(
-                when {
-                    layerMode == GlCompositor.LAYER_PIP ->
-                        "Capa B en PiP · ${layerAnchorLabel(layerAnchor)}"
-                    layerMode == GlCompositor.LAYER_OVERLAY ->
-                        "Capa B superpuesta · ${(layerOpacity * 100).roundToInt()} %"
-                    mix <= 0.01f -> "En el aire: A"
-                    mix >= 0.99f -> "En el aire: B"
-                    else -> "Mezclando: ${(100 - mix * 100).roundToInt()}% A · " +
-                        "${(mix * 100).roundToInt()}% B"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = NdiGlass.Muted
-            )
 
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+            MixerPanel {
+                MixerSectionHead(
+                    "Transición",
+                    if (transitionEnabled) "PVW · ${if (preview == GlCompositor.INPUT_B) "B" else "A"}"
+                    else "capas activas"
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    MixerButton(
+                        "PREVIEW A",
+                        active = preview == GlCompositor.INPUT_A,
+                        accent = MixerStyle.Cyan,
+                        enabled = transitionEnabled
+                    ) { preview = GlCompositor.INPUT_A }
+                    MixerButton(
+                        "PREVIEW B",
+                        active = preview == GlCompositor.INPUT_B,
+                        accent = MixerStyle.Cyan,
+                        enabled = transitionEnabled
+                    ) { preview = GlCompositor.INPUT_B }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(9.dp)
+                ) {
+                    MixerAction(
+                        "TAKE",
+                        listOf(MixerStyle.Cyan, MixerStyle.CyanDeep),
+                        modifier = Modifier.weight(1f),
+                        enabled = transitionEnabled
+                    ) {
+                        engine.fadeTo(preview, fadeMs)
+                        program = preview
+                    }
+                    Text("⇄", fontSize = 17.sp, color = MixerStyle.Muted)
+                    MixerAction(
+                        "CUT",
+                        listOf(MixerStyle.Amber, MixerStyle.AmberDeep),
+                        modifier = Modifier.weight(1f),
+                        enabled = transitionEnabled
+                    ) {
+                        engine.cutTo(preview)
+                        program = preview
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "FADE",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp,
+                        color = MixerStyle.Muted
+                    )
+                    listOf(200, 500, 1000).forEach { value ->
+                        MixerButton(
+                            "${value} ms",
+                            active = fadeMs == value,
+                            accent = MixerStyle.Cyan,
+                            enabled = transitionEnabled
+                        ) { fadeMs = value }
+                    }
+                }
+                Text(
+                    when {
+                        layerMode == GlCompositor.LAYER_PIP ->
+                            "Capa B en PiP · ${layerAnchorLabel(layerAnchor)}"
+                        layerMode == GlCompositor.LAYER_OVERLAY ->
+                            "Capa B superpuesta · ${(layerOpacity * 100).roundToInt()} %"
+                        mix <= 0.01f -> "En el aire: A"
+                        mix >= 0.99f -> "En el aire: B"
+                        else -> "Mezclando: ${(100 - mix * 100).roundToInt()}% A · " +
+                            "${(mix * 100).roundToInt()}% B"
+                    },
+                    fontSize = 10.sp,
+                    color = MixerStyle.Muted
+                )
+            }
 
-            Text(
-                "Capas · B sobre A",
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
-            )
+            MixerPanel {
+                MixerSectionHead(
+                    "Capas de video",
+                    if (layerMode == GlCompositor.LAYER_MIX) "MIX" else "B SOBRE A"
+                )
             Text(
                 when (layerMode) {
                     GlCompositor.LAYER_PIP ->
@@ -4818,21 +4907,32 @@ private fun MixerTab(
                     )
                 )
                 if (layerMode == GlCompositor.LAYER_PIP) {
-                    MixerButton(
-                        if (layerBorder) "Marco · sí" else "Marco · no",
-                        active = layerBorder,
-                        enabled = running
-                    ) { layerBorder = !layerBorder }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Marco", fontSize = 11.sp, color = MixerStyle.Soft)
+                            Text(
+                                "Borde claro alrededor del recuadro",
+                                fontSize = 9.sp,
+                                color = MixerStyle.Muted
+                            )
+                        }
+                        MixerToggle(layerBorder, running) { layerBorder = !layerBorder }
+                    }
                 }
             }
 
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-            Text(
-                "Keyer · entrada B",
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
-            )
+            MixerPanel {
+                MixerSectionHead(
+                    "Keyer · entrada B",
+                    when (keyMode) {
+                        GlCompositor.KEY_CHROMA -> "CHROMA"
+                        GlCompositor.KEY_LUMA -> "LUMA"
+                        else -> "OFF"
+                    }
+                )
             Text(
                 when (keyMode) {
                     GlCompositor.KEY_CHROMA ->
@@ -4850,18 +4950,18 @@ private fun MixerTab(
                     active = keyMode == GlCompositor.KEY_OFF,
                     enabled = running
                 ) { keyMode = GlCompositor.KEY_OFF }
-                MixerButton(
-                    "CHROMA",
-                    active = keyMode == GlCompositor.KEY_CHROMA,
-                    accent = Color(0xFF4ADE80),
-                    enabled = running
-                ) { keyMode = GlCompositor.KEY_CHROMA }
-                MixerButton(
-                    "LUMA",
-                    active = keyMode == GlCompositor.KEY_LUMA,
-                    accent = Color(0xFFB0B7C3),
-                    enabled = running
-                ) { keyMode = GlCompositor.KEY_LUMA }
+                                    MixerButton(
+                        "CHROMA",
+                        active = keyMode == GlCompositor.KEY_CHROMA,
+                        accent = MixerStyle.Green,
+                        enabled = running
+                    ) { keyMode = GlCompositor.KEY_CHROMA }
+                    MixerButton(
+                        "LUMA",
+                        active = keyMode == GlCompositor.KEY_LUMA,
+                        accent = Color(0xFFB0B7C3),
+                        enabled = running
+                    ) { keyMode = GlCompositor.KEY_LUMA }
             }
             if (keyMode != GlCompositor.KEY_OFF) {
                 if (keyMode == GlCompositor.KEY_CHROMA) {
@@ -4870,7 +4970,7 @@ private fun MixerTab(
                             MixerButton(
                                 label,
                                 active = keyColor == value,
-                                accent = Color(0xFF4ADE80),
+                                accent = MixerStyle.Green,
                                 enabled = running
                             ) { keyColor = value }
                         }
@@ -4924,13 +5024,10 @@ private fun MixerTab(
                 )
             }
 
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+            }
 
-            Text(
-                "Audio · micrófono + NDI",
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
-            )
+            MixerPanel {
+                MixerSectionHead("Audio", "A + B · MASTER")
             AudioStrip(
                 title = "A · Micrófono",
                 detail = when {
@@ -4988,75 +5085,353 @@ private fun MixerTab(
                 }
                 LevelMeter(audioLevels.masterLeft, audioLevels.masterRight)
             }
-
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "Grabación · programa",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = NdiGlass.Text
-                    )
-                    Text(
-                        when {
-                            recording ->
-                                "Grabando ${recordSeconds / 60}:" +
-                                    "${(recordSeconds % 60).toString().padStart(2, '0')} · " +
-                                    (engine.recordingPath?.substringAfterLast('/') ?: "MP4")
-                            recordFile != null ->
-                                "Guardado en ${recordFile?.substringAfter("Grabaciones/")}"
-                            else -> "MP4 con el cuadro compuesto y la mezcla de audio"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (recording) Color(0xFFFF6B60) else NdiGlass.Muted
-                    )
-                }
-                MixerButton(
-                    if (recording) "DETENER" else "GRABAR",
-                    active = recording,
-                    accent = Color(0xFFFF3B30),
-                    enabled = running
-                ) { if (recording) stopProgramRecording() else startProgramRecording() }
             }
 
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-            Text(
-                status,
-                style = MaterialTheme.typography.labelSmall,
-                color = NdiGlass.Muted
-            )
-            PrimaryAction(
-                when {
-                    running -> "Cortar la mezcla"
-                    starting -> "Arrancando…"
-                    else -> "Arrancar la mezcla"
+            MixerPanel {
+                MixerSectionHead(
+                    "Grabación",
+                    if (recording) "REC" else "PGM · MP4"
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Programa completo",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MixerStyle.Text
+                        )
+                        Text(
+                            when {
+                                recording ->
+                                    "Grabando ${recordSeconds / 60}:" +
+                                        "${(recordSeconds % 60).toString().padStart(2, '0')} · " +
+                                        (engine.recordingPath?.substringAfterLast('/') ?: "MP4")
+                                recordFile != null ->
+                                    "Guardado en ${recordFile?.substringAfter("Grabaciones/")}"
+                                else -> "MP4 con el cuadro compuesto y la mezcla de audio"
+                            },
+                            fontSize = 10.sp,
+                            color = if (recording) MixerStyle.Red else MixerStyle.Muted
+                        )
+                    }
+                    MixerButton(
+                        if (recording) "DETENER" else "GRABAR",
+                        active = recording,
+                        accent = MixerStyle.Red,
+                        enabled = running
+                    ) { if (recording) stopProgramRecording() else startProgramRecording() }
                 }
-            ) { if (!starting) toggleMix() }
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-            Text(
-                "API HTTP · control desde la red",
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
-            )
-            Text(
-                if (apiRunning) "http://$apiAddress" else
-                    "No se pudo abrir el puerto ${MixerApi.DEFAULT_PORT}",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (apiRunning) Color(0xFF4ADE80) else Color(0xFFFFC857)
-            )
-            Text(
-                "/status · /cut?input=b · /fade?input=b&ms=500 · " +
-                    "/layer?mode=pip&scale=0.34&anchor=br · " +
-                    "/audio?mic=1&ndi=1&micOpen=1 · " +
-                    "/key?mode=chroma&color=00B140 · /record?action=start",
-                style = MaterialTheme.typography.labelSmall,
-                color = NdiGlass.Muted.copy(alpha = 0.8f)
-            )
-            Spacer(Modifier.height(20.dp))
+            }
+
+            MixerPanel {
+                MixerSectionHead(
+                    "Realización",
+                    if (running) "PROGRAMA AL AIRE" else "EN PAUSA"
+                )
+                Text(
+                    status,
+                    fontSize = 10.sp,
+                    color = MixerStyle.Muted
+                )
+                MixerAction(
+                    when {
+                        running -> "CORTAR LA MEZCLA"
+                        starting -> "ARRANCANDO…"
+                        else -> "ARRANCAR LA MEZCLA"
+                    },
+                    if (running) {
+                        listOf(MixerStyle.Amber, MixerStyle.AmberDeep)
+                    } else {
+                        listOf(MixerStyle.Cyan, MixerStyle.CyanDeep)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !starting
+                ) { if (!starting) toggleMix() }
+            }
+
+            MixerPanel {
+                MixerSectionHead("API HTTP", "LAN · ${MixerApi.DEFAULT_PORT}")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (apiRunning) MixerStyle.Green
+                                else MixerStyle.Amber
+                            )
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        if (apiRunning) "http://$apiAddress" else
+                            "No se pudo abrir el puerto ${MixerApi.DEFAULT_PORT}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (apiRunning) MixerStyle.Green else MixerStyle.Amber
+                    )
+                }
+                Text(
+                    "/status · /cut?input=b · /fade?input=b&ms=500 · " +
+                        "/layer?mode=pip&scale=0.34&anchor=br · " +
+                        "/audio?mic=1&ndi=1&micOpen=1 · " +
+                        "/key?mode=chroma&color=00B140 · /record?action=start",
+                    fontSize = 9.sp,
+                    color = MixerStyle.Muted.copy(alpha = 0.9f)
+                )
+            }
+            Spacer(Modifier.height(24.dp))
         }
+    }
+}
+
+/**
+ * Paleta del mezclador: la de los mockups de control de realización (vidrio
+ * oscuro, cian de acción, verde al aire y ámbar de corte).
+ */
+private object MixerStyle {
+    val Bg = Color(0xFF080D18)
+    val BgTop = Color(0xFF0B1526)
+    val Glass = Color(0x9E162034)
+    val Line = Color(0x1FFFFFFF)
+    val Muted = Color(0xFF91A0B8)
+    val Text = Color(0xFFF3F7FF)
+    val Soft = Color(0xFFC8D4E8)
+    val Cyan = Color(0xFF55D8EF)
+    val CyanDeep = Color(0xFF63B8EF)
+    val Green = Color(0xFF54E0A1)
+    val Red = Color(0xFFFF647C)
+    val Amber = Color(0xFFFFC56B)
+    val AmberDeep = Color(0xFFFF9C69)
+    val Ink = Color(0xFF07131C)
+}
+
+/** Tarjeta de vidrio del mezclador. */
+@Composable
+private fun MixerPanel(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(MixerStyle.Glass)
+            .border(1.dp, MixerStyle.Line, RoundedCornerShape(18.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+        content = content
+    )
+}
+
+/** Encabezado de sección: mayúsculas espaciadas a la izquierda, dato a la derecha. */
+@Composable
+private fun MixerSectionHead(title: String, detail: String? = null) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title.uppercase(),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.9.sp,
+            color = MixerStyle.Soft
+        )
+        Spacer(Modifier.weight(1f))
+        if (detail != null) {
+            Text(detail, fontSize = 10.sp, color = MixerStyle.Muted, maxLines = 1)
+        }
+    }
+}
+
+/** Píldora de estado (PVW, LIVE, NDI…). */
+@Composable
+private fun MixerPill(text: String, color: Color = MixerStyle.Muted) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = 0.12f))
+            .border(1.dp, color.copy(alpha = 0.38f), RoundedCornerShape(50))
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+    ) {
+        Text(
+            text,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp,
+            color = color,
+            maxLines = 1
+        )
+    }
+}
+
+/** Botón de acción grande con degradado, como TAKE y CUT del mockup. */
+@Composable
+private fun MixerAction(
+    text: String,
+    colors: List<Color>,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier
+            .height(50.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Brush.linearGradient(colors))
+            .clickable(enabled = enabled) { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 0.7.sp,
+            color = if (enabled) MixerStyle.Ink else MixerStyle.Ink.copy(alpha = 0.45f)
+        )
+    }
+}
+
+/** Fila de entrada, con miniatura, estado y acción (PGM/PVW). */
+@Composable
+private fun MixerInputRow(
+    thumb: String,
+    title: String,
+    detail: String,
+    live: Boolean,
+    selected: Boolean,
+    action: String,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (selected) MixerStyle.Cyan.copy(alpha = 0.08f)
+                else Color.White.copy(alpha = 0.03f)
+            )
+            .border(
+                1.dp,
+                if (selected) MixerStyle.Cyan.copy(alpha = 0.33f)
+                else Color.White.copy(alpha = 0.07f),
+                RoundedCornerShape(12.dp)
+            )
+            .padding(9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            Modifier
+                .size(width = 52.dp, height = 35.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(
+                    Brush.linearGradient(
+                        listOf(Color(0xFF283C59), Color(0xFF172438))
+                    )
+                )
+                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                thumb,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+                color = Color(0xFF9FB5D1)
+            )
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MixerStyle.Text,
+                maxLines = 1
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (live) MixerStyle.Green
+                            else MixerStyle.Muted.copy(alpha = 0.5f)
+                        )
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    detail,
+                    fontSize = 9.sp,
+                    color = MixerStyle.Muted,
+                    maxLines = 1
+                )
+            }
+        }
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(
+                    if (selected) MixerStyle.Red.copy(alpha = 0.16f)
+                    else Color.White.copy(alpha = 0.07f)
+                )
+                .border(
+                    1.dp,
+                    if (selected) MixerStyle.Red.copy(alpha = 0.5f)
+                    else Color.White.copy(alpha = 0.15f),
+                    RoundedCornerShape(50)
+                )
+                .clickable { onClick() }
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        ) {
+            Text(
+                action,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+                color = if (selected) MixerStyle.Red else MixerStyle.Text
+            )
+        }
+    }
+}
+
+/** Interruptor redondeado de las capas y el mute. */
+@Composable
+private fun MixerToggle(
+    checked: Boolean,
+    enabled: Boolean = true,
+    onChange: () -> Unit
+) {
+    Row(
+        Modifier
+            .width(42.dp)
+            .height(24.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                if (checked) MixerStyle.Green.copy(alpha = 0.22f)
+                else Color.White.copy(alpha = 0.08f)
+            )
+            .border(
+                1.dp,
+                if (checked) MixerStyle.Green.copy(alpha = 0.55f)
+                else Color.White.copy(alpha = 0.16f),
+                RoundedCornerShape(20.dp)
+            )
+            .clickable(enabled = enabled) { onChange() }
+            .padding(3.dp),
+        horizontalArrangement = if (checked) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(16.dp)
+                .clip(CircleShape)
+                .background(if (checked) MixerStyle.Green else MixerStyle.Muted)
+        )
     }
 }
 
@@ -5131,26 +5506,27 @@ private fun AudioStrip(
         Column(Modifier.weight(1f)) {
             Text(
                 title,
-                style = MaterialTheme.typography.labelMedium,
-                color = NdiGlass.Text
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MixerStyle.Text
             )
             Text(
                 if (open) detail else "Silenciado en el programa",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (open) NdiGlass.Muted else Color(0xFFFFC857)
+                fontSize = 9.sp,
+                color = if (open) MixerStyle.Muted else MixerStyle.Amber
             )
         }
         LevelMeter(left, right)
         MixerButton(
             "${(gain * 100).roundToInt()}%",
-            accent = NdiGlass.Blue,
+            accent = MixerStyle.Cyan,
             enabled = enabled && open,
             onClick = onGain
         )
         MixerButton(
             if (open) "MUTE" else "MUDO",
             active = !open,
-            accent = Color(0xFFFF3B30),
+            accent = MixerStyle.Red,
             enabled = enabled,
             onClick = onToggle
         )
@@ -5161,15 +5537,15 @@ private fun AudioStrip(
 @Composable
 private fun MixerTally(label: String, program: Boolean, live: Boolean) {
     val color = when {
-        program -> Color(0xFFFF3B30)
-        live -> Color(0xFF4ADE80)
-        else -> Color.White.copy(alpha = 0.25f)
+        program -> MixerStyle.Red
+        live -> MixerStyle.Green
+        else -> MixerStyle.Muted.copy(alpha = 0.5f)
     }
     Row(
         Modifier
             .clip(RoundedCornerShape(50))
-            .background(Color.Black.copy(alpha = 0.6f))
-            .border(1.dp, color, RoundedCornerShape(50))
+            .background(Color(0xFF070D18).copy(alpha = 0.78f))
+            .border(1.dp, color.copy(alpha = 0.8f), RoundedCornerShape(50))
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -5189,32 +5565,48 @@ private fun MixerTally(label: String, program: Boolean, live: Boolean) {
 private fun MixerButton(
     text: String,
     active: Boolean = false,
-    accent: Color = NdiGlass.Blue,
+    accent: Color = MixerStyle.Cyan,
     enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     Box(
         Modifier
-            .height(44.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .height(40.dp)
+            .clip(RoundedCornerShape(11.dp))
             .background(
-                if (active) accent.copy(alpha = 0.85f)
-                else Color.White.copy(alpha = 0.08f)
+                if (active) {
+                    Brush.linearGradient(
+                        listOf(accent, accent.copy(alpha = 0.78f))
+                    )
+                } else {
+                    Brush.linearGradient(
+                        listOf(
+                            Color.White.copy(alpha = 0.09f),
+                            Color.White.copy(alpha = 0.05f)
+                        )
+                    )
+                }
             )
             .border(
                 1.dp,
-                if (active) accent else Color.White.copy(alpha = 0.18f),
-                RoundedCornerShape(12.dp)
+                if (active) accent.copy(alpha = 0.85f)
+                else Color.White.copy(alpha = 0.16f),
+                RoundedCornerShape(11.dp)
             )
             .clickable(enabled = enabled) { onClick() }
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = 13.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text,
             style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = if (enabled) Color.White else NdiGlass.Muted
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.4.sp,
+            color = when {
+                !enabled -> MixerStyle.Muted
+                active -> MixerStyle.Ink
+                else -> MixerStyle.Text
+            }
         )
     }
 }
