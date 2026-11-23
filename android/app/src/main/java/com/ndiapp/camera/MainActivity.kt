@@ -153,7 +153,7 @@ import com.ndiapp.camera.media.AudioNdiSource
 import com.ndiapp.camera.media.MediaItem
 import com.ndiapp.camera.media.MediaKind
 import com.ndiapp.camera.media.MediaPlaylistPlayer
-import com.ndiapp.camera.ndi.NdiFinder
+import com.ndiapp.camera.ndi.NdiDiscovery
 import com.ndiapp.camera.mixer.AudioMixer
 import com.ndiapp.camera.mixer.GlCompositor
 import com.ndiapp.camera.mixer.MixerApi
@@ -265,7 +265,13 @@ private var boundNetwork: Network? = null
 private fun bindToWifi(context: Context): Boolean = runCatching {
     val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
         as? ConnectivityManager
-    val wifi = manager?.allNetworks?.firstOrNull { network ->
+    // Se prefiere la red activa: con varias redes Wi-Fi visibles (Wi-Fi Direct,
+    // Aware, una repetidora) recorrer allNetworks podía elegir otra y devolver
+    // "cambió la red" en cada vuelta, reiniciando la búsqueda sin parar.
+    val activeNetwork = manager?.activeNetwork
+    val activeIsWifi = activeNetwork != null && manager.getNetworkCapabilities(activeNetwork)
+        ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+    val wifi = if (activeIsWifi) activeNetwork else manager?.allNetworks?.firstOrNull { network ->
         manager.getNetworkCapabilities(network)
             ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
     } ?: return@runCatching false
@@ -279,7 +285,7 @@ private fun bindToWifi(context: Context): Boolean = runCatching {
 
 /** Fija los sockets a la Wi-Fi y rehace el finder si cambió la red. */
 private fun ensureWifiBinding(context: Context) {
-    if (bindToWifi(context)) sharedNdiFinder.restart()
+    if (bindToWifi(context)) NdiDiscovery.restart()
 }
 
 /**
@@ -587,7 +593,6 @@ private fun enterPip(activity: Activity?, aspect: Float = 16f / 9f) {
 private var lastCrashText: String? = null
 
 /** Finder de NDI compartido por toda la app: no se destruye nunca. */
-private val sharedNdiFinder: NdiFinder by lazy { NdiFinder() }
 
 /** Estado compartido entre el visor y la pantalla de ajustes. */
 private class CameraUi(val appContext: Context) {
@@ -3346,7 +3351,6 @@ private fun ScreenTab(onMenu: () -> Unit) {
 @Composable
 private fun MonitorTab(onMenu: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val finder = remember { sharedNdiFinder }
     val receiver = remember { NdiReceiverController() }
     var sources by remember { mutableStateOf(emptyList<NdiSource>()) }
     var playing by remember { mutableStateOf<NdiSource?>(null) }
@@ -3510,15 +3514,17 @@ private fun MonitorTab(onMenu: () -> Unit) {
     }
 
     LaunchedEffect(Unit) {
+        NdiDiscovery.start()
         while (true) {
             // Con datos móviles activos los sockets del proceso tienen que
             // quedar en la Wi-Fi o el anuncio de las fuentes no llega.
             withContext(Dispatchers.IO) { ensureWifiBinding(context) }
-            val found = withContext(Dispatchers.IO) { finder.sources() }
-            sources = found
+            // La búsqueda corre en su propio hilo: acá sólo se lee lo último
+            // encontrado, sin esperas que vacíen la lista.
+            sources = NdiDiscovery.sources()
             MulticastLock.ensure(context)
             net = withContext(Dispatchers.IO) { localNetwork(context) }
-            delay(2500)
+            delay(800)
         }
     }
     DisposableEffect(Unit) {
@@ -4123,7 +4129,6 @@ private fun MixerTab(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val finder = remember { sharedNdiFinder }
     val receiver = remember { NdiReceiverController() }
     val engine = remember { MixerEngine(context) }
 
@@ -4255,11 +4260,12 @@ private fun MixerTab(
     }
 
     LaunchedEffect(Unit) {
+        NdiDiscovery.start()
         while (true) {
             withContext(Dispatchers.IO) { ensureWifiBinding(context) }
-            sources = withContext(Dispatchers.IO) { finder.sources() }
+            sources = NdiDiscovery.sources()
             MulticastLock.ensure(context)
-            delay(2500)
+            delay(800)
         }
     }
 

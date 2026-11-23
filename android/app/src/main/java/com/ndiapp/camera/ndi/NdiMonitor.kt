@@ -25,14 +25,19 @@ class NdiFinder {
 
     private var handle: Long = NdiNative.findCreate()
 
+    /** Última lista buena: un sondeo vacío no tiene por qué borrarla. */
+    @Volatile
+    private var last: List<NdiSource> = emptyList()
+    private var emptyPolls = 0
+
     val isAvailable: Boolean
         get() = handle != 0L
 
     @Synchronized
-    fun sources(timeoutMs: Int = 400): List<NdiSource> {
-        if (handle == 0L) return emptyList()
-        val raw = NdiNative.findSources(handle, timeoutMs) ?: return emptyList()
-        return raw.map { entry ->
+    fun sources(timeoutMs: Int = 600): List<NdiSource> {
+        if (handle == 0L) return last
+        val raw = NdiNative.findSources(handle, timeoutMs) ?: return last
+        val parsed = raw.map { entry ->
             val parts = entry.split('\t')
             NdiSource(
                 name = parts.firstOrNull()?.substringAfterLast('(', parts.first())?.trimEnd(')')
@@ -41,6 +46,18 @@ class NdiFinder {
                 url = parts.getOrNull(1).orEmpty()
             )
         }
+        if (parsed.isEmpty()) {
+            // El finder de NDI tarda en poblarse y cada espera puede vencer sin
+            // novedades. Borrar la lista en el primer vacío hacía que las
+            // fuentes aparecieran y desaparecieran mientras se buscaban.
+            emptyPolls++
+            if (emptyPolls < 3) return last
+            last = emptyList()
+        } else {
+            emptyPolls = 0
+            last = parsed
+        }
+        return last
     }
 
     /**
@@ -55,6 +72,8 @@ class NdiFinder {
             handle = 0L
         }
         handle = NdiNative.findCreate()
+        last = emptyList()
+        emptyPolls = 0
     }
 
     @Synchronized
@@ -63,6 +82,73 @@ class NdiFinder {
             NdiNative.findDestroy(handle)
             handle = 0L
         }
+        last = emptyList()
+        emptyPolls = 0
+    }
+}
+
+/**
+ * Descubrimiento continuo, compartido por el monitor y el mezclador.
+ *
+ * Antes cada pestaña pedía fuentes cada 2,5 s con una espera corta: entre
+ * consulta y consulta había dos segundos a ciegas y, si se reiniciaba el finder
+ * al cambiar la red, la lista se vaciaba y las fuentes tardaban en volver a
+ * aparecer. Acá hay un solo finder que escucha sin pausa y guarda la última
+ * lista buena; las pestañas sólo leen ese resultado.
+ */
+object NdiDiscovery {
+
+    private val finder = NdiFinder()
+
+    @Volatile
+    private var current: List<NdiSource> = emptyList()
+
+    @Volatile
+    private var started = false
+
+    /** El reinicio se pide y lo hace el propio hilo entre dos esperas. */
+    @Volatile
+    private var restartRequested = false
+
+    private var thread: Thread? = null
+
+    /** Última lista conocida; no bloquea ni toca la red. */
+    fun sources(): List<NdiSource> = current
+
+    @Synchronized
+    fun start() {
+        if (started) return
+        started = true
+        val worker = Thread {
+            while (started) {
+                if (restartRequested) {
+                    restartRequested = false
+                    runCatching { finder.restart() }
+                }
+                // Espera larga: el hilo del finder de NDI escucha entre vueltas
+                // y la lista acumulada se mantiene.
+                current = finder.sources(900)
+                runCatching { Thread.sleep(100) }
+            }
+        }
+        worker.name = "ndi-discovery"
+        worker.isDaemon = true
+        worker.priority = Thread.NORM_PRIORITY
+        thread = worker
+        worker.start()
+    }
+
+    /** Rehace el finder tras un cambio de red, sin cortar la lista actual. */
+    fun restart() {
+        if (!started) return
+        restartRequested = true
+    }
+
+    fun stop() {
+        started = false
+        thread?.interrupt()
+        thread = null
+        current = emptyList()
     }
 }
 
