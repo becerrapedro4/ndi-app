@@ -493,7 +493,12 @@ class CameraSession(private val context: Context) {
         val lenses = rearLenses
         if (lenses.isEmpty()) return null
         val chosen = req.cameraId?.let { wanted -> lenses.firstOrNull { it.id == wanted } }
-        return chosen ?: lenses.minByOrNull { abs(it.equivMm - 26f) } ?: lenses.firstOrNull()
+        if (chosen != null) return chosen
+        // Por defecto, una lente que el sistema ya expone: abrir de entrada una
+        // física oculta deja la vista previa en negro en varios equipos.
+        val exposed = lenses.filter { it.physical == null }
+        val pool = exposed.ifEmpty { lenses }
+        return pool.minByOrNull { abs(it.equivMm - 26f) } ?: pool.firstOrNull()
     }
 
     /**

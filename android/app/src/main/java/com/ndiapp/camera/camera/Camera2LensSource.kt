@@ -175,6 +175,9 @@ class Camera2LensSource(private val context: Context) {
     private var fpsWindowStart = 0L
     private var fpsFrames = 0
 
+    /** Cuadros entregados a la app: si sigue en 0, la sesión abrió sin imagen. */
+    private var framesSeen = 0L
+
     private var recorder: MediaRecorder? = null
     private var recordingFile: File? = null
     private var pendingRecorderStart = false
@@ -212,9 +215,6 @@ class Camera2LensSource(private val context: Context) {
     ) {
         this.logicalId = cameraId
         this.physicalId = physicalId
-        // Se pide el rango de fps que el sensor admite de verdad: con un rango
-        // 30-60 el AE puede caer a 30 en poca luz y NDI seguiría anunciando 60.
-        targetFps = chooseFpsRange(fps)
         previewView = preview
         preview.holder.addCallback(holderCallback)
         if (preview.holder.surface?.isValid == true) {
@@ -231,13 +231,12 @@ class Camera2LensSource(private val context: Context) {
             characteristics = runCatching { manager.getCameraCharacteristics(cameraId) }.getOrNull()
         }
         readRanges(characteristics)
-        // Para broadcast se prefiere OIS (no recorta el cuadro); si no hay, se
-        // usa la estabilización de vídeo y, si tampoco, queda apagada.
-        stabilization = when {
-            opticalStabilizationAvailable -> 2
-            videoStabilizationAvailable -> 1
-            else -> 0
-        }
+        // Recién acá están los rangos reales del sensor: antes se pedía siempre
+        // 30-30 porque la lista todavía estaba vacía.
+        targetFps = chooseFpsRange(fps)
+        // Como en 1.15.19: estabilización de vídeo, que es la que el HAL acepta
+        // en la sesión de análisis. OIS queda para cuando el usuario la pida.
+        stabilization = if (videoStabilizationAvailable) 1 else 0
         updateFrameRotation()
         runCatching {
             displayManager.unregisterDisplayListener(displayListener)
@@ -340,6 +339,7 @@ class Camera2LensSource(private val context: Context) {
                 if (closed) return@setOnImageAvailableListener
                 val image = runCatching { source.acquireLatestImage() }.getOrNull()
                     ?: return@setOnImageAvailableListener
+                framesSeen++
                 try {
                     onFrame?.invoke(image)
                 } catch (t: Throwable) {
@@ -380,6 +380,9 @@ class Camera2LensSource(private val context: Context) {
                                 return
                             }
                             session = configured
+                            framesSeen = 0L
+                            mainHandler.removeCallbacks(frameWatchdog)
+                            mainHandler.postDelayed(frameWatchdog, 3_000)
                             runCatching {
                                 configured.setRepeatingRequest(
                                     buildRequest(camera), captureCallback, mainHandler
@@ -410,6 +413,14 @@ class Camera2LensSource(private val context: Context) {
         }
     }
 
+    /** Si la lente abrió pero no entrega ni un cuadro, se dice en el visor. */
+    private val frameWatchdog = Runnable {
+        if (closed) return@Runnable
+        if (framesSeen == 0L) {
+            onError?.invoke("La lente abrió pero no entrega imagen; probá 1080p en 16:9")
+        }
+    }
+
     private fun recorderSurface(): Surface? = recorder?.surface
 
     private fun restartSession() {
@@ -421,9 +432,10 @@ class Camera2LensSource(private val context: Context) {
     }
 
     private fun buildRequest(camera: CameraDevice): CaptureRequest {
-        // TEMPLATE_RECORD es la plantilla de vídeo: el ISP afina el enfoque y la
-        // exposición para movimiento continuo, no para una foto previa.
-        val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+        // TEMPLATE_PREVIEW: con TEMPLATE_RECORD y una sesión sin encoder la vista
+        // previa quedaba en negro en varios equipos, así que se vuelve a la
+        // plantilla que ya funcionaba en 1.15.19.
+        val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         reader?.surface?.let { builder.addTarget(it) }
         previewSurface?.let { builder.addTarget(it) }
         recorderSurface()?.let { builder.addTarget(it) }
@@ -791,6 +803,7 @@ class Camera2LensSource(private val context: Context) {
         runCatching { manager?.unregisterAvailabilityCallback(availabilityCallback) }
         mainHandler.removeCallbacks(reopenRunnable)
         mainHandler.removeCallbacks(clearFocusRegion)
+        mainHandler.removeCallbacks(frameWatchdog)
         runCatching { session?.stopRepeating() }
         runCatching { session?.close() }
         runCatching { device?.close() }
